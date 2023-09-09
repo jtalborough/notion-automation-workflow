@@ -1,3 +1,29 @@
+# .github/workflows/notion_workflow.yml
 
-          echo Add other actions to build,
-          echo test, and deploy your project.
+name: Notion Workflow
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  notion-job:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: pip install requests
+
+    - name: Run Notion script
+      env:
+        NOTION_API_TOKEN: ${{ secrets.NOTION_API_TOKEN }}
+        DATABASE_ID: ${{ secrets.DATABASE_ID }}
+      run: python .github/scripts/notion_script.py
