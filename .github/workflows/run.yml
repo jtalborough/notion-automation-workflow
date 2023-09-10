@@ -8,11 +8,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v2  # This checks out your repository code
-      
+
     - name: Set up Python
       uses: actions/setup-python@v2  # This sets up Python
       with:
@@ -20,6 +20,17 @@ jobs:
 
     - name: Install dependencies
       run: pip install -r requirements.txt  # Install any required packages
-      
+
+    - name: Set up environment variables
+      run: |
+        echo "NOTION_API_TOKEN=${{ secrets.NOTION_API_TOKEN }}" >> $GITHUB_ENV
+        echo "NOTION_DATABASE_ID=${{ secrets.NOTION_DATABASE_ID }}" >> $GITHUB_ENV
+      env:
+        NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        NOTION_API_TOKEN: ${{ secrets.NOTION_API_TOKEN }}
+        
     - name: Run Python script
       run: python notion_script.py  # Use 'notion_script.py' as the script name
+      env:
+        NOTION_API_TOKEN: ${{ secrets.NOTION_API_TOKEN }}
+        NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
