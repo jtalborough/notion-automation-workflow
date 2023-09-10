@@ -1,4 +1,4 @@
 requests
-dotenv
+dotenv==0.19.1  # Specify a version that works
 python-dotenv
 python-dateutil
