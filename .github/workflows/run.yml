@@ -1,29 +1,25 @@
-# .github/workflows/notion_workflow.yml
-
-name: Notion Workflow
+name: Python Script Workflow
 
 on:
   push:
     branches:
-      - main
+      - main  # You can specify the branch you want to trigger the workflow on
 
 jobs:
-  notion-job:
+  build:
     runs-on: ubuntu-latest
+    
     steps:
     - name: Checkout code
-      uses: actions/checkout@v2
-
+      uses: actions/checkout@v2  # This checks out your repository code
+      
     - name: Set up Python
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v2  # This sets up Python
       with:
-        python-version: '3.x'
+        python-version: 3.8  # You can specify the Python version you need
 
     - name: Install dependencies
-      run: pip install requests
-
-    - name: Run Notion script
-      env:
-        NOTION_API_TOKEN: ${{ secrets.NOTION_API_TOKEN }}
-        DATABASE_ID: ${{ secrets.DATABASE_ID }}
-      run: python .github/scripts/notion_script.py
+      run: pip install -r requirements.txt  # Install any required packages
+      
+    - name: Run Python script
+      run: python notion_script.py  # Use 'notion_script.py' as the script name
