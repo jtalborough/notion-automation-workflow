@@ -127,6 +127,9 @@ if response.status_code == 200:
                                     "name": new_status
                                 }
                             }
+                            "Done": {
+                                "checkbox": false
+                            }
                         }
                     }
                     update_url = f"https://api.notion.com/v1/pages/{task_id}"
