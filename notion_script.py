@@ -128,7 +128,7 @@ if response.status_code == 200:
                                 }
                             },
                             "Done": {
-                                "checkbox": false
+                                "checkbox": False
                             }
                         }
                     }
