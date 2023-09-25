@@ -126,7 +126,7 @@ if response.status_code == 200:
                                 "status": {
                                     "name": new_status
                                 }
-                            }
+                            },
                             "Done": {
                                 "checkbox": false
                             }
