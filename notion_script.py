@@ -25,14 +25,27 @@ headers = {
 # Function to calculate the new DoDate based on the tag
 
 # Define the filter conditions to only retrieve tasks where 'Status' is 'Done'
-filter_params = {
+filter_params =     {
     "filter": {
-        "property": "Status",
-        "status": {
-            "equals": "Done"
-        }
+        "and": 
+        [
+            {
+            "property": "Status",
+            "status": {
+                "equals": "Done"
+                 }
+            }, 
+            {
+            "property": "Recurring",
+            "formula": {
+                    "string": {
+                    "contains": "True"
+                    }
+                }
+            }
+        ]
     }
-}
+    }
 
 archive=False
 def calculate_new_dodate(tag):
