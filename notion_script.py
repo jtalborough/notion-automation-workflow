@@ -38,9 +38,9 @@ filter_params =     {
             {
             "property": "Recurring",
             "formula": {
-                    "string": {
-                    "contains": "True"
-                    }
+                "checkbox": {
+                    "equals": true
+                     }
                 }
             }
         ]
