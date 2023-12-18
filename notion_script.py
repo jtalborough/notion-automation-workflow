@@ -39,7 +39,7 @@ filter_params =     {
             "property": "Recurring",
             "formula": {
                 "checkbox": {
-                    "equals": true
+                    "equals": True
                      }
                 }
             }
