@@ -326,11 +326,51 @@ class TaskService:
         for task in done_tasks:
             task_id = task["id"]
             try:
+                # Skip re-checking the status since we already filtered for Done tasks
+                logger.info(f"Processing task {task_id} (already filtered as 'Done')")
+                
                 # Check if the task is recurring
                 is_recurring = self._is_recurring_task(task)
+                logger.info(f"Task {task_id} is_recurring: {is_recurring}")
                 
-                # Process the task - move to notebook and either reset or archive
-                result = self.move_task_to_notebook(task_id)
+                # Copy all the task's content blocks
+                blocks = self.notion.get_all_block_children(task_id)
+                
+                # Convert task properties to notebook properties
+                notebook_properties = self._map_task_to_notebook_properties(task)
+                
+                # Create new page in notebook database with the mapped properties and content
+                new_page = self.notion.create_page(
+                    parent_id=self.notebook_database_id,
+                    properties=notebook_properties,
+                    is_database=True,
+                    children=blocks
+                )
+                
+                # Handle the original task based on whether it's recurring or not
+                if is_recurring:
+                    # Reset the task for the next occurrence
+                    updated_task = self._handle_recurring_task(task)
+                    logger.info(f"Reset recurring task {task_id} for next occurrence")
+                else:
+                    # Archive the original task
+                    self.notion.update_page(
+                        page_id=task_id,
+                        properties={
+                            status_id: {
+                                "status": {
+                                    "name": "Archived"
+                                }
+                            }
+                        },
+                        archived=False  # Not actually archiving in Notion, just updating status
+                    )
+                    logger.info(f"Archived non-recurring task {task_id}")
+                
+                result = {
+                    "original_task_id": task_id,
+                    "new_notebook_page_id": new_page["id"]
+                }
                 
                 # Add the result to the appropriate list
                 if is_recurring:
@@ -340,6 +380,8 @@ class TaskService:
                     
             except Exception as e:
                 logger.error(f"Error processing task {task_id}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
         
         return recurring_results, non_recurring_results
     
