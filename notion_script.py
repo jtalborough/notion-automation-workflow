@@ -160,11 +160,49 @@ class TaskService:
         """Initialize the task service with a Notion client."""
         self.notion = notion_client or NotionClientWrapper()
         
-        if not TASK_DATABASE_ID or not NOTEBOOK_DATABASE_ID:
-            raise ValueError("TASK_DATABASE_ID and NOTEBOOK_DATABASE_ID must be set in environment variables")
+        # Validate environment variables
+        if not NOTION_API_TOKEN:
+            raise ValueError("NOTION_API_TOKEN must be set in environment variables")
+            
+        if not TASK_DATABASE_ID:
+            raise ValueError("TASK_DATABASE_ID must be set in environment variables")
+            
+        if not NOTEBOOK_DATABASE_ID:
+            raise ValueError("NOTEBOOK_DATABASE_ID must be set in environment variables")
         
         self.task_database_id = TASK_DATABASE_ID
         self.notebook_database_id = NOTEBOOK_DATABASE_ID
+        
+        # Validate database access
+        self._validate_database_access()
+        
+    def _validate_database_access(self):
+        """Validate that the databases exist and are accessible."""
+        try:
+            # Try to query task database
+            logger.info(f"Validating access to task database: {self.task_database_id}")
+            self.notion.query_database(
+                database_id=self.task_database_id,
+                filter_dict={},
+                sorts=[{"property": "created_time", "direction": "descending"}]
+            )
+            logger.info("Task database access validated successfully")
+            
+            # Try to query notebook database
+            logger.info(f"Validating access to notebook database: {self.notebook_database_id}")
+            self.notion.query_database(
+                database_id=self.notebook_database_id,
+                filter_dict={},
+                sorts=[{"property": "created_time", "direction": "descending"}]
+            )
+            logger.info("Notebook database access validated successfully")
+            
+        except Exception as e:
+            error_msg = str(e)
+            if "Could not find database" in error_msg:
+                raise ValueError(f"Database not found or integration doesn't have access. Please check your database IDs and make sure your Notion integration has been added to both databases. Error: {error_msg}")
+            else:
+                raise ValueError(f"Error validating database access: {error_msg}")
 
     def move_task_to_notebook(self, task_id: str) -> Dict[str, Any]:
         """
@@ -191,16 +229,15 @@ class TaskService:
             logger.warning(f"Task {task_id} is not from the task database")
             raise ValueError(f"Task {task_id} is not from the task database")
         
-        # Check if the task is marked as done
+        # Check if the task status is "Done"
         status = task.get("properties", {}).get("Status", {}).get("status", {}).get("name", "")
-        done = task.get("properties", {}).get("Done", {}).get("checkbox", False)
         
-        logger.info(f"Task status: {status}, Done: {done}")
+        logger.info(f"Task {task_id} status: {status}")
         
-        # Only process tasks that are marked as done
-        if not done:
-            logger.info(f"Task {task_id} is not marked as done, skipping")
-            return {"status": "skipped", "message": "Task not marked as done", "original_task_id": task_id}
+        # Only process tasks that have Status set to "Done"
+        if status != "Done":
+            logger.info(f"Task {task_id} does not have status 'Done', skipping")
+            return {"status": "skipped", "message": "Task status is not 'Done'", "original_task_id": task_id}
         
         # Check if this is a recurring task
         is_recurring = self._is_recurring_task(task)
