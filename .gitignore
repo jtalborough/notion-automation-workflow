@@ -1,2 +1,5 @@
 .env
 myenv
+
+# Schema documentation files
+schema/
