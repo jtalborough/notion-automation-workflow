@@ -424,118 +424,184 @@ class TaskService:
         task_properties = task.get("properties", {})
         notebook_properties = {}
         
-        # Property ID mapping from TasksDB to Notebook
-        # Using the actual IDs from the database schema
-        PROPERTY_MAP = {
-            # Title property (Task -> Title)
-            "title": "title",
-            # Status property 
-            "293591cd-faf9-4508-a72d-267ba96420d8": "293591cd-faf9-4508-a72d-267ba96420d8",
-            # Tag property
-            "Bh\\CH": "Bh\\CH",
-            # Priority property
-            "OxaH": "OxaH",
-            # Type property
-            "xR?W": "xR?W",
-            # Location property
-            "H]z@": "H]z@",
-            # DoneDate property
-            "x~tu": "x~tu",
-            # DoDate property
-            "tolq": "tolq",
-            # Project relation property
-            "a~|l": "a~|l",
-            # People multi-select property
-            "pCAL": "pCAL",
-            # Done checkbox property
-            "b5ecd428-a8f4-4cc1-b739-cde15798dc5e": "b5ecd428-a8f4-4cc1-b739-cde15798dc5e",
-            # URL property
-            "K`WM": "K`WM",
-            # Time property
-            "XD`@": "XD`@",
-            # Cost property
-            "e75003f5-a9dc-4d80-9388-2828842b6e73": "e75003f5-a9dc-4d80-9388-2828842b6e73",
+        # Let's map tasks to notebook by property name rather than ID,
+        # since IDs may differ between databases
+        notebook_property_map = {
+            "title": "title",          # Title maps to title
+            "Status": "Status",        # Status maps to Status 
+            "Tag": "Tag",              # Tags map to Tags
+            "Priority": "Priority",    # Priority maps to Priority
+            "Type": "Type",            # Type maps to Type
+            "Location": "Location",    # Location maps to Location
+            "DoneDate": "DoneDate",    # DoneDate maps to DoneDate
+            "DoDate": "DoDate",        # DoDate maps to DoDate
+            "Project": "Project",      # Project maps to Project
+            "People": "People",        # People maps to People
+            "Done": "Done",            # Done maps to Done
+            "URL": "URL",              # URL maps to URL
+            "Time": "Time",            # Time maps to Time
+            "Cost": "Cost",            # Cost maps to Cost
         }
         
-        # Map the title property first - it's a special case
-        title_property = task_properties.get("title", {})
-        if title_property.get("title"):
-            notebook_properties["title"] = {
-                "title": title_property.get("title", [])
-            }
+        # First, we collect properties by name from the task
+        # This helps us match by name rather than ID
+        task_properties_by_name = {}
+        property_types = {}
         
-        # Map all other properties using IDs
+        # Loop through all properties and extract their names
         for prop_id, prop_data in task_properties.items():
-            # Skip the title property (already handled)
-            if prop_id == "title":
-                continue
-                
-            # Check if this property ID is in our mapping
-            if prop_id not in PROPERTY_MAP:
-                continue
-                
-            notebook_prop_id = PROPERTY_MAP[prop_id]
             prop_type = prop_data.get("type")
             
-            # Skip button properties and other non-transferable types
+            # Skip non-transferable types
             if prop_type in ["button", "formula", "rollup"]:
                 continue
             
-            # Copy over the property with the same structure but using the notebook property ID
-            if prop_type == "select" and prop_data.get("select"):
-                notebook_properties[notebook_prop_id] = {
-                    "select": prop_data.get("select")
+            # Handle title property specially
+            if prop_id == "title":
+                if prop_data.get("title"):
+                    notebook_properties["title"] = {
+                        "title": prop_data.get("title", [])
+                    }
+                continue
+            
+            # Status property (extract status name)
+            if prop_type == "status":
+                status_name = prop_data.get("status", {}).get("name", "")
+                task_properties_by_name["Status"] = {"type": prop_type, "value": status_name, "raw": prop_data}
+                property_types["Status"] = prop_type
+                
+            # Tag property (multi-select)
+            elif prop_type == "multi_select" and "Tag" in prop_id:
+                tags = prop_data.get("multi_select", [])
+                task_properties_by_name["Tag"] = {"type": prop_type, "value": tags, "raw": prop_data}
+                property_types["Tag"] = prop_type
+            
+            # Priority property (select)
+            elif prop_type == "select" and "Priority" in prop_id:
+                priority = prop_data.get("select")
+                task_properties_by_name["Priority"] = {"type": prop_type, "value": priority, "raw": prop_data}
+                property_types["Priority"] = prop_type
+            
+            # Type property (select)
+            elif prop_type == "select" and "Type" in prop_id:
+                type_val = prop_data.get("select")
+                task_properties_by_name["Type"] = {"type": prop_type, "value": type_val, "raw": prop_data}
+                property_types["Type"] = prop_type
+            
+            # Location property (select)
+            elif prop_type == "select" and "Location" in prop_id:
+                location = prop_data.get("select")
+                task_properties_by_name["Location"] = {"type": prop_type, "value": location, "raw": prop_data}
+                property_types["Location"] = prop_type
+            
+            # Date properties
+            elif prop_type == "date":
+                if "Done" in prop_id:
+                    task_properties_by_name["DoneDate"] = {"type": prop_type, "value": prop_data.get("date"), "raw": prop_data}
+                    property_types["DoneDate"] = prop_type
+                elif "Do" in prop_id:
+                    task_properties_by_name["DoDate"] = {"type": prop_type, "value": prop_data.get("date"), "raw": prop_data}
+                    property_types["DoDate"] = prop_type
+            
+            # People property
+            elif prop_type == "people":
+                people = prop_data.get("people", [])
+                task_properties_by_name["People"] = {"type": prop_type, "value": people, "raw": prop_data}
+                property_types["People"] = prop_type
+            
+            # Done checkbox
+            elif prop_type == "checkbox" and "Done" in prop_id:
+                done = prop_data.get("checkbox", False)
+                task_properties_by_name["Done"] = {"type": prop_type, "value": done, "raw": prop_data}
+                property_types["Done"] = prop_type
+            
+            # URL property
+            elif prop_type == "url":
+                url = prop_data.get("url", "")
+                task_properties_by_name["URL"] = {"type": prop_type, "value": url, "raw": prop_data}
+                property_types["URL"] = prop_type
+            
+            # Time property (number)
+            elif prop_type == "number" and "Time" in prop_id:
+                time_val = prop_data.get("number")
+                task_properties_by_name["Time"] = {"type": prop_type, "value": time_val, "raw": prop_data}
+                property_types["Time"] = prop_type
+            
+            # Cost property (number)
+            elif prop_type == "number" and "Cost" in prop_id:
+                cost = prop_data.get("number")
+                task_properties_by_name["Cost"] = {"type": prop_type, "value": cost, "raw": prop_data}
+                property_types["Cost"] = prop_type
+        
+        # Now build notebook properties using property names from our map
+        logger.info(f"Mapping properties from task to notebook")
+        for task_prop_name, notebook_prop_name in notebook_property_map.items():
+            if task_prop_name == "title":
+                continue  # Already handled title
+                
+            if task_prop_name not in task_properties_by_name:
+                continue  # Skip properties not found
+                
+            prop_info = task_properties_by_name[task_prop_name]
+            prop_type = prop_info["type"]
+            
+            logger.info(f"Mapping {task_prop_name} ({prop_type}) to notebook property {notebook_prop_name}")
+            
+            # Map based on property type
+            if prop_type == "select" and prop_info["value"]:
+                notebook_properties[notebook_prop_name] = {
+                    "select": prop_info["value"]
                 }
-            elif prop_type == "multi_select" and prop_data.get("multi_select"):
-                notebook_properties[notebook_prop_id] = {
-                    "multi_select": prop_data.get("multi_select")
+            elif prop_type == "multi_select" and prop_info["value"]:
+                notebook_properties[notebook_prop_name] = {
+                    "multi_select": prop_info["value"]
                 }
-            elif prop_type == "date" and prop_data.get("date"):
-                notebook_properties[notebook_prop_id] = {
-                    "date": prop_data.get("date")
+            elif prop_type == "date" and prop_info["value"]:
+                notebook_properties[notebook_prop_name] = {
+                    "date": prop_info["value"]
                 }
-            elif prop_type == "rich_text" and prop_data.get("rich_text"):
-                notebook_properties[notebook_prop_id] = {
-                    "rich_text": prop_data.get("rich_text")
+            elif prop_type == "rich_text" and "value" in prop_info:
+                notebook_properties[notebook_prop_name] = {
+                    "rich_text": prop_info["value"]
                 }
-            elif prop_type == "number" and prop_data.get("number") is not None:
-                notebook_properties[notebook_prop_id] = {
-                    "number": prop_data.get("number")
+            elif prop_type == "number" and prop_info["value"] is not None:
+                notebook_properties[notebook_prop_name] = {
+                    "number": prop_info["value"]
                 }
             elif prop_type == "checkbox":
-                notebook_properties[notebook_prop_id] = {
-                    "checkbox": prop_data.get("checkbox", False)
+                notebook_properties[notebook_prop_name] = {
+                    "checkbox": prop_info["value"]
                 }
-            elif prop_type == "url" and prop_data.get("url"):
-                notebook_properties[notebook_prop_id] = {
-                    "url": prop_data.get("url")
+            elif prop_type == "url" and prop_info["value"]:
+                notebook_properties[notebook_prop_name] = {
+                    "url": prop_info["value"]
                 }
-            elif prop_type == "people" and prop_data.get("people"):
-                notebook_properties[notebook_prop_id] = {
-                    "people": prop_data.get("people")
+            elif prop_type == "people" and prop_info["value"]:
+                notebook_properties[notebook_prop_name] = {
+                    "people": prop_info["value"]
                 }
-            elif prop_type == "relation" and prop_data.get("relation"):
-                notebook_properties[notebook_prop_id] = {
-                    "relation": prop_data.get("relation")
+            elif prop_type == "relation" and prop_info["value"]:
+                notebook_properties[notebook_prop_name] = {
+                    "relation": prop_info["value"]
                 }
-            elif prop_type == "status" and prop_data.get("status"):
-                notebook_properties[notebook_prop_id] = {
-                    "status": prop_data.get("status")
+            elif prop_type == "status" and prop_info["value"]:
+                notebook_properties[notebook_prop_name] = {
+                    "status": {
+                        "name": prop_info["value"]
+                    }
                 }
         
-        # Set status to Done if it wasn't copied from the original
-        status_id = "293591cd-faf9-4508-a72d-267ba96420d8"
-        if status_id not in notebook_properties:
-            notebook_properties[status_id] = {
+        # Set status to Done if not already included
+        if "Status" not in notebook_properties:
+            notebook_properties["Status"] = {
                 "status": {
                     "name": "Done"
                 }
             }
         
-        # Set DoneDate if not already set
-        done_date_id = "x~tu"
-        if done_date_id not in notebook_properties:
-            notebook_properties[done_date_id] = {
+        # Set DoneDate if not already included
+        if "DoneDate" not in notebook_properties:
+            notebook_properties["DoneDate"] = {
                 "date": {
                     "start": datetime.now().strftime("%Y-%m-%d")
                 }
