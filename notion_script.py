@@ -187,8 +187,8 @@ class TaskService:
             logger.info(f"Validating access to task database: {self.task_database_id}")
             self.notion.query_database(
                 database_id=self.task_database_id,
-                filter_dict={},
-                sorts=[{"property": "created_time", "direction": "descending"}]
+                filter_dict={}
+                # Not using sorts since we're just validating access
             )
             logger.info("Task database access validated successfully")
             
@@ -196,8 +196,8 @@ class TaskService:
             logger.info(f"Validating access to notebook database: {self.notebook_database_id}")
             self.notion.query_database(
                 database_id=self.notebook_database_id,
-                filter_dict={},
-                sorts=[{"property": "created_time", "direction": "descending"}]
+                filter_dict={}
+                # Not using sorts since we're just validating access
             )
             logger.info("Notebook database access validated successfully")
             
