@@ -25,13 +25,16 @@ jobs:
     - name: Set up environment variables
       run: |
         echo "NOTION_API_TOKEN=${{ secrets.NOTION_API_TOKEN }}" >> $GITHUB_ENV
-        echo "NOTION_DATABASE_ID=${{ secrets.NOTION_DATABASE_ID }}" >> $GITHUB_ENV
+        echo "TASK_DATABASE_ID=${{ secrets.TASK_DATABASE_ID }}" >> $GITHUB_ENV
+        echo "NOTEBOOK_DATABASE_ID=${{ secrets.NOTEBOOK_DATABASE_ID }}" >> $GITHUB_ENV
       env:
-        NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         NOTION_API_TOKEN: ${{ secrets.NOTION_API_TOKEN }}
+        TASK_DATABASE_ID: ${{ secrets.TASK_DATABASE_ID }}
+        NOTEBOOK_DATABASE_ID: ${{ secrets.NOTEBOOK_DATABASE_ID }}
         
     - name: Run Python script
       run: python notion_script.py  # Use 'notion_script.py' as the script name
       env:
         NOTION_API_TOKEN: ${{ secrets.NOTION_API_TOKEN }}
-        NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        TASK_DATABASE_ID: ${{ secrets.TASK_DATABASE_ID }}
+        NOTEBOOK_DATABASE_ID: ${{ secrets.NOTEBOOK_DATABASE_ID }}
