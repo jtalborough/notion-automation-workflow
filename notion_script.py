@@ -292,19 +292,32 @@ class TaskService:
         Returns:
             Tuple of (recurring_results, non_recurring_results)
         """
-        # Find all tasks with 'Done' status
+        # Find all tasks with 'Done' status using the property ID
+        status_id = "293591cd-faf9-4508-a72d-267ba96420d8"  # ID for the Status property
+        
         filter_dict = {
-            "property": "Status",
+            "property": status_id,
             "status": {
                 "equals": "Done"
             }
         }
+        
+        logger.info(f"Filtering tasks with Status='Done' using property ID: {status_id}")
         
         # Get all tasks with Done status
         done_tasks = self.notion.query_database(
             database_id=self.task_database_id,
             filter_dict=filter_dict
         )
+        
+        logger.info(f"Found {len(done_tasks)} tasks with Status='Done'")
+        
+        # Debug log the task IDs and their status
+        for task in done_tasks:
+            task_id = task.get("id", "unknown")
+            status = task.get("properties", {}).get(status_id, {}).get("status", {}).get("name", "unknown")
+            logger.info(f"Found Done task: ID={task_id}, Status={status}")
+
         
         recurring_results = []
         non_recurring_results = []
