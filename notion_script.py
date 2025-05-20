@@ -242,6 +242,53 @@ class TaskService:
             "new_notebook_page_id": new_page["id"]
         }
     
+    def process_all_completed_tasks(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Process all tasks marked with 'Done' status.
+        Identifies recurring and non-recurring tasks, then processes them accordingly.
+        
+        Returns:
+            Tuple of (recurring_results, non_recurring_results)
+        """
+        # Find all tasks with 'Done' status
+        filter_dict = {
+            "property": "Status",
+            "status": {
+                "equals": "Done"
+            }
+        }
+        
+        # Get all tasks with Done status
+        done_tasks = self.notion.query_database(
+            database_id=self.task_database_id,
+            filter_dict=filter_dict
+        )
+        
+        recurring_results = []
+        non_recurring_results = []
+        
+        # Process each task based on whether it's recurring or not
+        for task in done_tasks:
+            task_id = task["id"]
+            try:
+                # Check if the task is recurring
+                is_recurring = self._is_recurring_task(task)
+                
+                # Process the task - move to notebook and either reset or archive
+                result = self.move_task_to_notebook(task_id)
+                
+                # Add the result to the appropriate list
+                if is_recurring:
+                    recurring_results.append(result)
+                else:
+                    non_recurring_results.append(result)
+                    
+            except Exception as e:
+                logger.error(f"Error processing task {task_id}: {e}")
+        
+        return recurring_results, non_recurring_results
+    
+    # Keeping these methods for backward compatibility
     def process_recurring_tasks(self) -> List[Dict[str, Any]]:
         """
         Process all recurring tasks that are marked as Done.
@@ -250,41 +297,8 @@ class TaskService:
         Returns:
             List of task IDs that were processed
         """
-        # Find all completed tasks with recurring tags
-        filter_dict = {
-            "and": [
-                {
-                    "property": "Done",
-                    "checkbox": {
-                        "equals": True
-                    }
-                },
-                {
-                    "property": "Recurring",
-                    "formula": {
-                        "boolean": {
-                            "equals": True
-                        }
-                    }
-                }
-            ]
-        }
-        
-        recurring_done_tasks = self.notion.query_database(
-            database_id=self.task_database_id,
-            filter_dict=filter_dict
-        )
-        
-        results = []
-        for task in recurring_done_tasks:
-            task_id = task["id"]
-            try:
-                result = self.move_task_to_notebook(task_id)
-                results.append(result)
-            except Exception as e:
-                logger.error(f"Error processing recurring task {task_id}: {e}")
-                
-        return results
+        recurring_results, _ = self.process_all_completed_tasks()
+        return recurring_results
         
     def process_completed_tasks(self, archive: bool = True) -> List[Dict[str, Any]]:
         """
@@ -297,41 +311,8 @@ class TaskService:
         Returns:
             List of task IDs that were processed
         """
-        # Find all completed non-recurring tasks
-        filter_dict = {
-            "and": [
-                {
-                    "property": "Done",
-                    "checkbox": {
-                        "equals": True
-                    }
-                },
-                {
-                    "property": "Recurring",
-                    "formula": {
-                        "boolean": {
-                            "equals": False
-                        }
-                    }
-                }
-            ]
-        }
-        
-        completed_tasks = self.notion.query_database(
-            database_id=self.task_database_id,
-            filter_dict=filter_dict
-        )
-        
-        results = []
-        for task in completed_tasks:
-            task_id = task["id"]
-            try:
-                result = self.move_task_to_notebook(task_id)
-                results.append(result)
-            except Exception as e:
-                logger.error(f"Error processing completed task {task_id}: {e}")
-                
-        return results
+        _, non_recurring_results = self.process_all_completed_tasks()
+        return non_recurring_results
         
     def _map_task_to_notebook_properties(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -433,7 +414,7 @@ class TaskService:
         # Check if the Recurring formula property exists and is true
         properties = task.get("properties", {})
         recurring_prop = properties.get("Recurring", {})
-        if recurring_prop.get("type") == "formula" and recurring_prop.get("formula", {}).get("boolean") == True:
+        if recurring_prop.get("type") == "formula" and recurring_prop.get("formula", {}).get("checkbox") == True:
             return True
             
         # Check tags for recurring patterns
@@ -600,26 +581,35 @@ def main():
         # Initialize the TaskService
         task_service = TaskService()
         
-        # Process recurring tasks
-        print("Processing recurring tasks...")
-        recurring_results = task_service.process_recurring_tasks()
-        print(f"Processed {len(recurring_results)} recurring tasks")
+        # Process all completed tasks in one go
+        print("Processing all completed tasks...")
+        recurring_results, non_recurring_results = task_service.process_all_completed_tasks()
         
-        # Process completed non-recurring tasks
-        print("\nProcessing completed non-recurring tasks...")
-        completed_results = task_service.process_completed_tasks(archive=True)
-        print(f"Processed {len(completed_results)} completed tasks")
+        # Print summary of results
+        print(f"Processed {len(recurring_results)} recurring tasks")
+        print(f"Processed {len(non_recurring_results)} non-recurring tasks")
         
         # Summary
-        total_tasks = len(recurring_results) + len(completed_results)
+        total_tasks = len(recurring_results) + len(non_recurring_results)
         print(f"\nTotal tasks processed: {total_tasks}")
         
         if total_tasks > 0:
             print("\nDetailed results:")
-            for result in recurring_results + completed_results:
-                original_id = result.get("original_task_id")
-                new_id = result.get("new_notebook_page_id")
-                print(f"  Task {original_id} moved to notebook page {new_id}")
+            # First show recurring tasks
+            if recurring_results:
+                print("\nRecurring tasks (copied to notebook and reset):")
+                for result in recurring_results:
+                    original_id = result.get("original_task_id")
+                    new_id = result.get("new_notebook_page_id")
+                    print(f"  Task {original_id} moved to notebook page {new_id}")
+            
+            # Then show non-recurring tasks
+            if non_recurring_results:
+                print("\nNon-recurring tasks (copied to notebook and archived):")
+                for result in non_recurring_results:
+                    original_id = result.get("original_task_id")
+                    new_id = result.get("new_notebook_page_id")
+                    print(f"  Task {original_id} moved to notebook page {new_id}")
         
         print("\nTask processing complete")
         
