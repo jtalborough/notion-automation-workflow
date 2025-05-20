@@ -1,6 +1,7 @@
 import requests
 import os
 import re
+import json
 import logging
 from dotenv import load_dotenv
 from typing import Dict, List, Any, Optional, Tuple
@@ -105,19 +106,38 @@ class NotionClientWrapper:
         return response.json()
         
     def create_page(self, parent_id: str, properties: Dict, is_database: bool = False, 
-                    children: Optional[List] = None) -> Dict[str, Any]:
+                    children: Optional[List] = None, title_for_api: Optional[str] = None) -> Dict[str, Any]:
         """Create a new page in a Notion database or as a child of another page."""
         url = f"{self.base_url}/pages"
         
         parent = {}
         if is_database:
-            parent["database_id"] = parent_id
+            parent = {"database_id": parent_id}
         else:
-            parent["page_id"] = parent_id
+            parent = {"page_id": parent_id}
+            
+        # Make a clean copy of properties
+        clean_properties = properties.copy()
+        
+        # If title_for_api is provided, ensure it's set correctly in the properties
+        if title_for_api:
+            logger.info(f"Setting title directly from API parameter: '{title_for_api}'")
+            
+            # For database entries, title must be in the properties
+            if is_database:
+                # Set the title field - this field must be named exactly as it appears in the database schema
+                clean_properties["Title"] = {
+                    "title": [
+                        {
+                            "type": "text",
+                            "text": {"content": title_for_api}
+                        }
+                    ]
+                }
             
         payload = {
             "parent": parent,
-            "properties": properties
+            "properties": clean_properties
         }
         
         if children:
@@ -339,13 +359,21 @@ class TaskService:
                 # Convert task properties to notebook properties
                 notebook_properties = self._map_task_to_notebook_properties(task)
                 
+                # Get the task title for API
+                task_title = self._get_title_from_page(task)
+                logger.info(f"Passing task title to API: '{task_title}'")
+                
                 # Create new page in notebook database with the mapped properties and content
                 new_page = self.notion.create_page(
                     parent_id=self.notebook_database_id,
                     properties=notebook_properties,
                     is_database=True,
-                    children=blocks
+                    children=blocks if blocks else None,
+                    title_for_api=task_title
                 )
+                
+                # Verify that the task data was properly transferred
+                self._verify_data_transfer(task, new_page, notebook_properties)
                 
                 # Handle the original task based on whether it's recurring or not
                 if is_recurring:
@@ -424,24 +452,59 @@ class TaskService:
         task_properties = task.get("properties", {})
         notebook_properties = {}
         
-        # Let's map tasks to notebook by property name rather than ID,
-        # since IDs may differ between databases
-        notebook_property_map = {
-            "title": "title",          # Title maps to title
-            "Status": "Status",        # Status maps to Status 
-            "Tag": "Tag",              # Tags map to Tags
-            "Priority": "Priority",    # Priority maps to Priority
-            "Type": "Type",            # Type maps to Type
-            "Location": "Location",    # Location maps to Location
-            "DoneDate": "DoneDate",    # DoneDate maps to DoneDate
-            "DoDate": "DoDate",        # DoDate maps to DoDate
-            "Project": "Project",      # Project maps to Project
-            "People": "People",        # People maps to People
-            "Done": "Done",            # Done maps to Done
-            "URL": "URL",              # URL maps to URL
-            "Time": "Time",            # Time maps to Time
-            "Cost": "Cost",            # Cost maps to Cost
+        # Map task database property names to notebook database property names
+        # The API returns property names as keys, so we'll use those directly
+        property_name_map = {
+            "title": "title",          # Title (special handling)
+            "Status": "Status",        # Status 
+            "Tag": "Tag",              # Tag
+            "Priority": "Priority",    # Priority
+            "Type": "Type",            # Type
+            "Location": "Location",    # Location
+            "DoneDate": "DoneDate",    # DoneDate
+            "DoDate": "DoDate",        # DoDate
+            "Project": "Project",      # Project
+            "People": "People",        # People
+            "Done": "Done",            # Done
+            "URL": "URL",              # URL
+            "Time": "Time",            # Time
+            "Cost": "Cost",            # Cost
         }
+        
+        # Extract the plain text title from the task
+        title_value = ""
+        title_property = task_properties.get("title", {})
+        
+        if title_property.get("title"):
+            title_content = title_property.get("title", [])
+            # Extract plain text from title content
+            title_value = "".join([item.get("plain_text", "") for item in title_content])
+            
+        # Set the notebook title - in Notion API, the database title field MUST be called "title"
+        # but in the UI it shows as "Title" - this is a known quirk of the Notion API
+        if title_value:
+            # According to Notion API docs, the title field must be "title" (lowercase)
+            # even though in the UI and schema it appears as "Title"
+            notebook_properties["title"] = {
+                "title": [
+                    {
+                        "type": "text",
+                        "text": {"content": title_value}
+                    }
+                ]
+            }
+            logger.info(f"Setting title to: '{title_value}' using Notion API convention")
+            
+            # Print debug info about notebook properties
+            logger.info(f"Title property JSON: {json.dumps(notebook_properties['title'])}")
+            
+            # For Notion API debugging - dump request JSON
+            debug_props = notebook_properties.copy()
+            debug_props.pop('title', None)
+            logger.info(f"Other properties: {list(debug_props.keys())}")
+            
+            # Hard-set the title directly in the API call parameters
+            self.title_for_api = title_value
         
         # First, we collect properties by name from the task
         # This helps us match by name rather than ID
@@ -459,6 +522,8 @@ class TaskService:
             # Handle title property specially
             if prop_id == "title":
                 if prop_data.get("title"):
+                    # Make sure the title is properly mapped
+                    logger.info(f"Setting title property with value: {prop_data.get('title')}")
                     notebook_properties["title"] = {
                         "title": prop_data.get("title", [])
                     }
@@ -515,6 +580,25 @@ class TaskService:
                 task_properties_by_name["Done"] = {"type": prop_type, "value": done, "raw": prop_data}
                 property_types["Done"] = prop_type
             
+            # Project relation property
+            elif prop_type == "relation":
+                relations = prop_data.get("relation", [])
+                
+                # Project is a special case that requires careful handling
+                if "Project" in prop_id or "project" in prop_id.lower():
+                    if relations:
+                        logger.info(f"Found Project relation with {len(relations)} connected items: {relations}")
+                        task_properties_by_name["Project"] = {"type": prop_type, "value": relations, "raw": prop_data}
+                        property_types["Project"] = prop_type
+                        
+                        # Directly set the Project relation in notebook properties
+                        notebook_properties["Project"] = {
+                            "relation": relations
+                        }
+                        logger.info(f"Directly setting Project relation with {len(relations)} items")
+                    else:
+                        logger.info("Project relation found but no connected items")
+            
             # URL property
             elif prop_type == "url":
                 url = prop_data.get("url", "")
@@ -534,62 +618,81 @@ class TaskService:
                 property_types["Cost"] = prop_type
         
         # Now build notebook properties using property names from our map
-        logger.info(f"Mapping properties from task to notebook")
-        for task_prop_name, notebook_prop_name in notebook_property_map.items():
+        logger.info(f"Mapping properties from task to notebook using property names")
+        # Log all available property names in the task for debugging
+        logger.info(f"Available task properties: {list(task_properties.keys())}")
+        
+        for task_prop_name, notebook_prop_name in property_name_map.items():
             if task_prop_name == "title":
                 continue  # Already handled title
-                
-            if task_prop_name not in task_properties_by_name:
+            
+            # Check if this property name exists in the task
+            if task_prop_name not in task_properties:
+                logger.info(f"Property '{task_prop_name}' not found in task")
                 continue  # Skip properties not found
-                
-            prop_info = task_properties_by_name[task_prop_name]
-            prop_type = prop_info["type"]
+            
+            # Get the property data and type
+            prop_data = task_properties[task_prop_name]
+            prop_type = prop_data.get("type")
             
             logger.info(f"Mapping {task_prop_name} ({prop_type}) to notebook property {notebook_prop_name}")
             
-            # Map based on property type
-            if prop_type == "select" and prop_info["value"]:
-                notebook_properties[notebook_prop_name] = {
-                    "select": prop_info["value"]
-                }
-            elif prop_type == "multi_select" and prop_info["value"]:
-                notebook_properties[notebook_prop_name] = {
-                    "multi_select": prop_info["value"]
-                }
-            elif prop_type == "date" and prop_info["value"]:
-                notebook_properties[notebook_prop_name] = {
-                    "date": prop_info["value"]
-                }
-            elif prop_type == "rich_text" and "value" in prop_info:
-                notebook_properties[notebook_prop_name] = {
-                    "rich_text": prop_info["value"]
-                }
-            elif prop_type == "number" and prop_info["value"] is not None:
-                notebook_properties[notebook_prop_name] = {
-                    "number": prop_info["value"]
-                }
+            # Extract values based on property type
+            if prop_type == "status":
+                value = prop_data.get("status", {}).get("name", "")
+                if value:
+                    notebook_properties[notebook_prop_name] = {"status": {"name": value}}
+                    logger.info(f"Set status property '{notebook_prop_name}' to '{value}'")
+                    
+            elif prop_type == "select":
+                value = prop_data.get("select")
+                if value:
+                    notebook_properties[notebook_prop_name] = {"select": value}
+                    
+            elif prop_type == "multi_select":
+                values = prop_data.get("multi_select", [])
+                if values:
+                    notebook_properties[notebook_prop_name] = {"multi_select": values}
+                    
+            elif prop_type == "date":
+                value = prop_data.get("date")
+                if value:
+                    notebook_properties[notebook_prop_name] = {"date": value}
+                    
             elif prop_type == "checkbox":
-                notebook_properties[notebook_prop_name] = {
-                    "checkbox": prop_info["value"]
-                }
-            elif prop_type == "url" and prop_info["value"]:
-                notebook_properties[notebook_prop_name] = {
-                    "url": prop_info["value"]
-                }
-            elif prop_type == "people" and prop_info["value"]:
-                notebook_properties[notebook_prop_name] = {
-                    "people": prop_info["value"]
-                }
-            elif prop_type == "relation" and prop_info["value"]:
-                notebook_properties[notebook_prop_name] = {
-                    "relation": prop_info["value"]
-                }
-            elif prop_type == "status" and prop_info["value"]:
-                notebook_properties[notebook_prop_name] = {
-                    "status": {
-                        "name": prop_info["value"]
-                    }
-                }
+                value = prop_data.get("checkbox", False)
+                notebook_properties[notebook_prop_name] = {"checkbox": value}
+                
+            elif prop_type == "url":
+                value = prop_data.get("url", "")
+                if value:
+                    notebook_properties[notebook_prop_name] = {"url": value}
+                    
+            elif prop_type == "number":
+                value = prop_data.get("number")
+                if value is not None:
+                    notebook_properties[notebook_prop_name] = {"number": value}
+                    
+            elif prop_type == "relation":
+                relations = prop_data.get("relation", [])
+                if relations:
+                    # Special handling for Project relation
+                    if task_prop_name == "Project":
+                        logger.info(f"Found Project relation with {len(relations)} connected items: {relations}")
+                    notebook_properties[notebook_prop_name] = {"relation": relations}
+                else:
+                    logger.info(f"{task_prop_name} relation found but no connected items")
+                    
+            elif prop_type == "people":
+                people = prop_data.get("people", [])
+                if people:
+                    notebook_properties[notebook_prop_name] = {"people": people}
+            
+            # Rich text handling (not included in the property_id_map)
+            if prop_type == "rich_text" and "rich_text" in prop_data:
+                rich_text = prop_data.get("rich_text", [])
+                if rich_text:
+                    notebook_properties[notebook_prop_name] = {"rich_text": rich_text}
         
         # Set status to Done if not already included
         if "Status" not in notebook_properties:
@@ -598,14 +701,26 @@ class TaskService:
                     "name": "Done"
                 }
             }
+            logger.info("Setting default Status='Done'")
         
         # Set DoneDate if not already included
         if "DoneDate" not in notebook_properties:
+            current_date = datetime.now().strftime("%Y-%m-%d")
             notebook_properties["DoneDate"] = {
                 "date": {
-                    "start": datetime.now().strftime("%Y-%m-%d")
+                    "start": current_date
                 }
             }
+            logger.info(f"Setting default DoneDate={current_date}")
+            
+        # Set Done checkbox if not already included
+        if "Done" not in notebook_properties:
+            notebook_properties["Done"] = {
+                "checkbox": True
+            }
+            logger.info("Setting default Done=True")
+            
+        logger.info(f"Final notebook properties:\n{json.dumps(notebook_properties, indent=2)}")
         
         return notebook_properties
     
@@ -717,9 +832,131 @@ class TaskService:
         
         return updated_task
     
+    def _verify_data_transfer(self, task: Dict[str, Any], new_page: Dict[str, Any], notebook_properties: Dict[str, Any]):
+        """
+        Verify that the task data was properly transferred to the notebook page.
+        Compare original task properties with the mapped notebook properties.
+        
+        Args:
+            task: The original task page from Notion
+            new_page: The newly created notebook page
+            notebook_properties: The properties mapped for the notebook page
+        """
+        task_id = task.get("id", "unknown")
+        notebook_id = new_page.get("id", "unknown")
+        logger.info(f"Verifying data transfer from task {task_id} to notebook page {notebook_id}")
+        
+        # Check title transfer - this is a special case
+        task_title = self._get_title_from_page(task)
+        notebook_title = self._get_title_from_page(new_page)
+        
+        # Log the title comparison for debugging
+        logger.info(f"Task title: '{task_title}'")
+        logger.info(f"Notebook title: '{notebook_title}'")
+        
+        if task_title and notebook_title:
+            if task_title == notebook_title:
+                logger.info(f"Title verification: '{task_title}' correctly transferred")
+            else:
+                logger.warning(f"Title mismatch: Task title '{task_title}' differs from notebook title '{notebook_title}'")
+        elif task_title and not notebook_title:
+            logger.warning(f"Title missing: Task title '{task_title}' not transferred to notebook")
+        elif not task_title and notebook_title:
+            logger.info(f"Title added: New title '{notebook_title}' was set in notebook")
+        else:
+            logger.warning("Both task and notebook are missing titles")
+
+        # Find all project relations
+        project_relations_transferred = False
+        task_projects = []
+        notebook_projects = []
+        
+        # Check original task project relations
+        for prop_name, prop_data in task.get("properties", {}).items():
+            if prop_data.get("type") == "relation" and ("Project" in prop_name or "project" in prop_name.lower()):
+                relations = prop_data.get("relation", [])
+                if relations:
+                    task_projects.extend([rel.get("id") for rel in relations])
+        
+        # Check notebook project relations
+        for prop_name, prop_data in new_page.get("properties", {}).items():
+            if prop_data.get("type") == "relation" and ("Project" in prop_name or "project" in prop_name.lower()):
+                relations = prop_data.get("relation", [])
+                if relations:
+                    notebook_projects.extend([rel.get("id") for rel in relations])
+        
+        # Log project relation transfer status
+        if task_projects:
+            overlap = set(task_projects) & set(notebook_projects)
+            if overlap:
+                logger.info(f"Project relations transferred: {len(overlap)} of {len(task_projects)}")
+                project_relations_transferred = True
+            else:
+                logger.warning(f"Project relations missing: {len(task_projects)} relations not transferred")
+        
+        # Verify other properties
+        # For Notion API responses, we can't directly compare by property type due to how Notion 
+        # represents and returns data. Instead, we'll check for existence of key properties.
+        critical_properties = [
+            "Status",
+            "Done",
+            "DoneDate"
+        ]
+        
+        missing_critical_props = []
+        for prop in critical_properties:
+            if prop not in new_page.get("properties", {}):
+                missing_critical_props.append(prop)
+        
+        if missing_critical_props:
+            logger.warning(f"Missing critical properties: {', '.join(missing_critical_props)}")
+        else:
+            logger.info("All critical properties exist in notebook entry")
+            
+        # Overall transfer success verdict
+        transfer_success = notebook_title and (not missing_critical_props) and (not task_projects or project_relations_transferred)
+        
+        if transfer_success:
+            logger.info("✅ Task successfully transferred to notebook")
+        else:
+            logger.warning("⚠️ Task transfer had some issues - check warnings above")
+            
+        return transfer_success
+
+    def _get_title_from_page(self, page: Dict[str, Any]) -> str:
+        """
+        Extract the title from a page object.
+        
+        Args:
+            page: The Notion page object
+            
+        Returns:
+            The page title as a string
+        """
+        properties = page.get("properties", {})
+        title_value = ""
+        
+        # First check the regular title field (used in our requests)
+        title_prop = properties.get("title", {})
+        if title_prop and "title" in title_prop and title_prop["title"]:
+            title_items = title_prop["title"]
+            title_value = "".join([item.get("plain_text", "") for item in title_items])
+            return title_value
+        
+        # If not found, check alternative title fields
+        for title_field in ["Title", "Task", "Name"]:
+            title_prop = properties.get(title_field, {})
+            if title_prop and "title" in title_prop and title_prop["title"]:
+                title_items = title_prop["title"]
+                title_value = "".join([item.get("plain_text", "") for item in title_items])
+                if title_value:
+                    return title_value
+        
+        return ""
+        
     def _calculate_next_date(self, pattern_type: str, pattern_details: Dict[str, Any]) -> datetime:
         """
-        Calculate the next occurrence date based on the recurring pattern.
+        Calculate the next date for a recurring task based on the pattern.
         
         Args:
             pattern_type: Type of pattern (relative, weekly, monthly)
