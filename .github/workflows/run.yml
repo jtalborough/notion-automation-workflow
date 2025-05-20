@@ -1,9 +1,7 @@
 name: Python Script Workflow
 
 on:
-  push:
-    branches:
-      - main  # This triggers the workflow on push to the 'main' branch
+  push: # This triggers the workflow on push to any branch
   schedule:
     - cron: '0 0 * * *'  # This schedules the workflow to run at midnight every day
 
