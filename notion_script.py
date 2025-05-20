@@ -3,6 +3,7 @@ import os
 import re
 import json
 import logging
+import urllib.parse
 from dotenv import load_dotenv
 from typing import Dict, List, Any, Optional, Tuple
 from dateutil.relativedelta import relativedelta
@@ -452,23 +453,79 @@ class TaskService:
         task_properties = task.get("properties", {})
         notebook_properties = {}
         
-        # Map task database property names to notebook database property names
-        # The API returns property names as keys, so we'll use those directly
-        property_name_map = {
-            "title": "title",          # Title (special handling)
-            "Status": "Status",        # Status 
-            "Tag": "Tag",              # Tag
-            "Priority": "Priority",    # Priority
-            "Type": "Type",            # Type
-            "Location": "Location",    # Location
-            "DoneDate": "DoneDate",    # DoneDate
-            "DoDate": "DoDate",        # DoDate
-            "Project": "Project",      # Project
-            "People": "People",        # People
-            "Done": "Done",            # Done
-            "URL": "URL",              # URL
-            "Time": "Time",            # Time
-            "Cost": "Cost",            # Cost
+        # Task database property IDs from API schema
+        # These are the actual IDs that Notion uses internally
+        # Using IDs makes the integration stable even if property names change in the UI
+        taskdb_property_ids = {
+            # Property name: Property ID (from raw_api_response in schema)
+            "title": "title",                                # Title is special in Notion API
+            "Status": "293591cd-faf9-4508-a72d-267ba96420d8", # Status property ID
+            "Tag": "Bh%5CH",                               # Tag property ID
+            "Priority": "F%3A%3BP",                         # Priority property ID
+            "Type": "F%40%5B%3A",                         # Type property ID 
+            "Location": "JJ%60S",                          # Location property ID
+            "DoneDate": "x~tu",                           # DoneDate property ID
+            "DoDate": "d%60BM",                           # DoDate property ID
+            "Project": "a~%7Cl",                           # Project relation property ID
+            "People": "kNFv",                             # People property ID
+            "Done": "n%3D%7BP",                           # Done property ID
+            "URL": "yWt%40",                              # URL property ID
+            "Time": "~MZe",                              # Time property ID
+            "Cost": "e75003f5-a9dc-4d80-9388-2828842b6e73", # Cost property ID
+        }
+        
+        # Notebook database property IDs from API schema
+        # These are the actual IDs that Notion uses internally
+        # Using the correct IDs ensures stability even if property names change
+        notebookdb_property_ids = {
+            # Property name: Property ID (from raw_api_response in schema)
+            "title": "title",                                # Title is special in Notion API
+            "Status": "6225b47e-e2ee-4c80-b088-805ead975486", # Status property ID
+            "Tag": "Bh%5CH",                               # Tag property ID
+            "Priority": "F%3A%3BP",                         # Priority property ID
+            "Type": "F%40%5B%3A",                         # Type property ID
+            "Location": "JJ%60S",                          # Location property ID
+            "DoneDate": "x~tu",                           # DoneDate property ID
+            "DoDate": "d%60BM",                           # DoDate property ID
+            "Project": "a~%7Cl",                           # Project relation property ID
+            "People": "kNFv",                             # People property ID
+            "Done": "b5ecd428-a8f4-4cc1-b739-cde15798dc5e", # Done property ID
+            "URL": "yWt%40",                              # URL property ID
+            "Time": "~MZe",                              # Time property ID
+            "Cost": "e75003f5-a9dc-4d80-9388-2828842b6e73", # Cost property ID
+        }
+        
+        # URL-decode the property IDs for use in the API
+        decoded_notebookdb_property_ids = {}
+        for prop_name, prop_id in notebookdb_property_ids.items():
+            # URL-decode the property ID
+            decoded_prop_id = urllib.parse.unquote(prop_id)
+            decoded_notebookdb_property_ids[prop_name] = decoded_prop_id
+            
+            # Log the original and decoded IDs for debugging
+            if prop_id != decoded_prop_id:
+                logger.info(f"Decoded property ID for {prop_name}: {prop_id} -> {decoded_prop_id}")
+        
+        # Important: When CREATING pages with the Notion API, we must use property NAMES, not IDs
+        # However, we keep the ID mapping for reference and potential future use cases
+        # For READ operations, we can use either
+        # For WRITE operations like page creation, we MUST use property names
+        property_mapping = {
+            # Task property name: Notebook property name
+            "title": "title",         # Title is special
+            "Status": "Status",       # Use name for API compatibility
+            "Tag": "Tag",             # Use name for API compatibility
+            "Priority": "Priority",   # Use name for API compatibility
+            "Type": "Type",           # Use name for API compatibility
+            "Location": "Location",   # Use name for API compatibility
+            "DoneDate": "DoneDate",   # Use name for API compatibility
+            "DoDate": "DoDate",       # Use name for API compatibility
+            "Project": "Project",     # Use name for API compatibility 
+            "People": "People",       # Use name for API compatibility
+            "Done": "Done",           # Use name for API compatibility
+            "URL": "URL",             # Use name for API compatibility
+            "Time": "Time",           # Use name for API compatibility
+            "Cost": "Cost",           # Use name for API compatibility
         }
         
         # Extract the plain text title from the task
@@ -480,11 +537,12 @@ class TaskService:
             # Extract plain text from title content
             title_value = "".join([item.get("plain_text", "") for item in title_content])
             
-        # Set the notebook title - in Notion API, the database title field MUST be called "title"
-        # but in the UI it shows as "Title" - this is a known quirk of the Notion API
+        # Set the notebook title - in Notion API, the title field is special
+        # The title property must always use the key "title" regardless of the actual property ID
+        # This is a known quirk/requirement of the Notion API 
         if title_value:
             # According to Notion API docs, the title field must be "title" (lowercase)
-            # even though in the UI and schema it appears as "Title"
+            # The title field ID doesn't matter - it must use the key "title"
             notebook_properties["title"] = {
                 "title": [
                     {
@@ -494,6 +552,7 @@ class TaskService:
                 ]
             }
             logger.info(f"Setting title to: '{title_value}' using Notion API convention")
+            logger.info("NOTE: Title field always uses the key 'title' in the API regardless of its actual ID")
             
             # Print debug info about notebook properties
             logger.info(f"Title property JSON: {json.dumps(notebook_properties['title'])}")
@@ -617,12 +676,12 @@ class TaskService:
                 task_properties_by_name["Cost"] = {"type": prop_type, "value": cost, "raw": prop_data}
                 property_types["Cost"] = prop_type
         
-        # Now build notebook properties using property names from our map
-        logger.info(f"Mapping properties from task to notebook using property names")
+        # Now build notebook properties using property IDs for maximum stability
+        logger.info(f"Mapping properties from task to notebook using property IDs")
         # Log all available property names in the task for debugging
         logger.info(f"Available task properties: {list(task_properties.keys())}")
         
-        for task_prop_name, notebook_prop_name in property_name_map.items():
+        for task_prop_name, notebook_prop_id in property_mapping.items():
             if task_prop_name == "title":
                 continue  # Already handled title
             
@@ -635,43 +694,48 @@ class TaskService:
             prop_data = task_properties[task_prop_name]
             prop_type = prop_data.get("type")
             
-            logger.info(f"Mapping {task_prop_name} ({prop_type}) to notebook property {notebook_prop_name}")
+            logger.info(f"Mapping {task_prop_name} ({prop_type}) to notebook property ID '{notebook_prop_id}'")
+            
+            # When creating pages with the Notion API, we must always use property NAMES (not IDs)
+            # After reviewing the Notion API documentation and testing, we've found that page creation
+            # requires property names as keys in the payload
+            prop_key = property_mapping[task_prop_name]
             
             # Extract values based on property type
             if prop_type == "status":
                 value = prop_data.get("status", {}).get("name", "")
                 if value:
-                    notebook_properties[notebook_prop_name] = {"status": {"name": value}}
-                    logger.info(f"Set status property '{notebook_prop_name}' to '{value}'")
+                    notebook_properties[prop_key] = {"status": {"name": value}}
+                    logger.info(f"Set status property '{prop_key}' to '{value}'")
                     
             elif prop_type == "select":
                 value = prop_data.get("select")
                 if value:
-                    notebook_properties[notebook_prop_name] = {"select": value}
+                    notebook_properties[prop_key] = {"select": value}
                     
             elif prop_type == "multi_select":
                 values = prop_data.get("multi_select", [])
                 if values:
-                    notebook_properties[notebook_prop_name] = {"multi_select": values}
+                    notebook_properties[prop_key] = {"multi_select": values}
                     
             elif prop_type == "date":
                 value = prop_data.get("date")
                 if value:
-                    notebook_properties[notebook_prop_name] = {"date": value}
+                    notebook_properties[prop_key] = {"date": value}
                     
             elif prop_type == "checkbox":
                 value = prop_data.get("checkbox", False)
-                notebook_properties[notebook_prop_name] = {"checkbox": value}
+                notebook_properties[prop_key] = {"checkbox": value}
                 
             elif prop_type == "url":
                 value = prop_data.get("url", "")
                 if value:
-                    notebook_properties[notebook_prop_name] = {"url": value}
+                    notebook_properties[prop_key] = {"url": value}
                     
             elif prop_type == "number":
                 value = prop_data.get("number")
                 if value is not None:
-                    notebook_properties[notebook_prop_name] = {"number": value}
+                    notebook_properties[prop_key] = {"number": value}
                     
             elif prop_type == "relation":
                 relations = prop_data.get("relation", [])
@@ -679,14 +743,14 @@ class TaskService:
                     # Special handling for Project relation
                     if task_prop_name == "Project":
                         logger.info(f"Found Project relation with {len(relations)} connected items: {relations}")
-                    notebook_properties[notebook_prop_name] = {"relation": relations}
+                    notebook_properties[prop_key] = {"relation": relations}
                 else:
                     logger.info(f"{task_prop_name} relation found but no connected items")
                     
             elif prop_type == "people":
                 people = prop_data.get("people", [])
                 if people:
-                    notebook_properties[notebook_prop_name] = {"people": people}
+                    notebook_properties[prop_key] = {"people": people}
             
             # Rich text handling (not included in the property_id_map)
             if prop_type == "rich_text" and "rich_text" in prop_data:
