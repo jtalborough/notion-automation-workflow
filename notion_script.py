@@ -160,11 +160,14 @@ class NotionClientWrapper:
         has_more = True
         start_cursor = None
         
+        logger.info(f"Fetching blocks for block ID: {block_id}")
+        
         while has_more:
             params = {}
             if start_cursor:
                 params["start_cursor"] = start_cursor
                 
+            logger.info(f"Making API request to {url} for blocks")
             response = requests.get(url, headers=self.headers, params=params)
             
             if response.status_code != 200:
@@ -172,10 +175,32 @@ class NotionClientWrapper:
                 response.raise_for_status()
                 
             result = response.json()
-            all_blocks.extend(result.get("results", []))
+            page_blocks = result.get("results", [])
+            logger.info(f"Received {len(page_blocks)} blocks from API in this page")
+            all_blocks.extend(page_blocks)
             
             has_more = result.get("has_more", False)
             start_cursor = result.get("next_cursor")
+            
+            if has_more:
+                logger.info(f"More blocks available, continuing with cursor: {start_cursor}")
+        
+        logger.info(f"Total blocks fetched: {len(all_blocks)}")
+        
+        # Log block types if any blocks were found
+        if all_blocks:
+            block_types = {}
+            for block in all_blocks:
+                block_type = block.get("type", "unknown")
+                block_types[block_type] = block_types.get(block_type, 0) + 1
+            logger.info(f"Block types summary: {block_types}")
+            
+            # Log first block as an example if there are any
+            if len(all_blocks) > 0:
+                first_block = all_blocks[0]
+                logger.info(f"First block type: {first_block.get('type', 'unknown')}, ID: {first_block.get('id', 'unknown')}")
+        else:
+            logger.warning(f"No blocks found for block ID: {block_id}")
             
         return all_blocks
 class TaskService:
@@ -232,12 +257,14 @@ class TaskService:
     def move_task_to_notebook(self, task_id: str) -> Dict[str, Any]:
         """
         Move a completed task from the Tasks database to the Notebook database.
+        Also extracts any uncompleted todos and creates new tasks for them.
         
         Args:
             task_id: ID of the task to move
             
         Returns:
-            Dictionary with the original and new task IDs
+            Dictionary with the original task ID, new notebook page ID,
+            and any new tasks created from uncompleted todos
         """
         # Retrieve the task from Notion
         task = self.notion.get_page(task_id)
@@ -269,7 +296,44 @@ class TaskService:
         is_recurring = self._is_recurring_task(task)
         
         # Copy all the task's content blocks
+        logger.info(f"Getting all block children for task {task_id}")
         blocks = self.notion.get_all_block_children(task_id)
+        logger.info(f"Received {len(blocks)} blocks from Notion API for task {task_id}")
+        
+        # Check for uncompleted todos in the task content and create new tasks for them
+        created_todo_tasks = []
+        if blocks:
+            print(f"DIRECT PRINT: About to call _extract_open_todos_from_task for task {task_id}")
+            logger.info(f"Calling _extract_open_todos_from_task for task {task_id} with {len(blocks)} blocks")
+            
+            # Extract uncompleted todos from task content
+            open_todos = self._extract_open_todos_from_task(task, blocks)
+            
+            print(f"DIRECT PRINT: After calling _extract_open_todos_from_task, got {len(open_todos)} todos")
+            logger.info(f"_extract_open_todos_from_task returned {len(open_todos)} open todos")
+            
+            # Create new tasks for any open todos
+            if open_todos:
+                task_title = self._get_title_from_page(task)
+                logger.info(f"Creating {len(open_todos)} new tasks for open todos from '{task_title}'")
+                
+                for todo_item in open_todos:
+                    try:
+                        # Create a new task in the task database
+                        new_task = self.notion.create_page(
+                            parent_id=self.task_database_id,
+                            properties=todo_item["properties"],
+                            is_database=True
+                        )
+                        
+                        created_todo_tasks.append({
+                            "todo_text": todo_item["todo_text"],
+                            "task_id": new_task["id"]
+                        })
+                        
+                        logger.info(f"Created new task: '{todo_item['todo_text']}'")
+                    except Exception as e:
+                        logger.error(f"Error creating task for todo '{todo_item['todo_text']}': {e}")
         
         # Convert task properties to notebook properties
         notebook_properties = self._map_task_to_notebook_properties(task)
@@ -285,7 +349,8 @@ class TaskService:
         # Handle the original task based on whether it's recurring or not
         if is_recurring:
             # Reset the task for the next occurrence
-            self._handle_recurring_task(task)
+            updated_task = self._handle_recurring_task(task)
+            logger.info(f"Reset recurring task {task_id} for next occurrence")
         else:
             # Archive the original task
             self.notion.update_page(
@@ -299,11 +364,18 @@ class TaskService:
                 },
                 archived=False  # Not actually archiving in Notion, just updating status
             )
+            logger.info(f"Archived non-recurring task {task_id}")
         
-        return {
+        result = {
             "original_task_id": task_id,
             "new_notebook_page_id": new_page["id"]
         }
+        
+        # Add information about created todo tasks if any
+        if created_todo_tasks:
+            result["created_todo_tasks"] = created_todo_tasks
+            
+        return result
     
     def process_all_completed_tasks(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
@@ -356,6 +428,115 @@ class TaskService:
                 
                 # Copy all the task's content blocks
                 blocks = self.notion.get_all_block_children(task_id)
+                
+                # Extract and process unchecked todos from the task content
+                if blocks:
+                    print(f"===== Processing {len(blocks)} blocks for task {task_id} to extract unchecked todos =====")
+                    open_todos = self._extract_open_todos_from_task(task, blocks)
+                    print(f"===== Found {len(open_todos)} unchecked todos in task {task_id} =====")
+                    
+                    # Create new tasks for any unchecked todos
+                    if open_todos:
+                        task_title = self._get_title_from_page(task)
+                        logger.info(f"Creating {len(open_todos)} new tasks for open todos from '{task_title}'")
+                        
+                        created_todo_ids = []
+                        
+                        for todo_item in open_todos:
+                            try:
+                                # Create a new task in the task database
+                                new_task = self.notion.create_page(
+                                    parent_id=self.task_database_id,
+                                    properties=todo_item["properties"],
+                                    is_database=True
+                                )
+                                
+                                todo_id = new_task["id"]
+                                created_todo_ids.append({
+                                    "block_id": todo_item["block_id"],
+                                    "task_id": todo_id,
+                                    "todo_text": todo_item["todo_text"]
+                                })
+                                
+                                logger.info(f"Created new task for todo: '{todo_item['todo_text']}'")
+                                logger.info(f"New task ID: {todo_id}")
+                            except Exception as e:
+                                logger.error(f"Error creating task for todo '{todo_item['todo_text']}': {e}")
+                        
+                        # Update the original todo blocks to mark them as moved BEFORE copying to notebook
+                        updated_block_ids = []
+                        for todo_info in created_todo_ids:
+                            try:
+                                # Update the original todo block with strikethrough formatting and "moved to tasks" prefix
+                                original_text = todo_info["todo_text"]
+                                block_id = todo_info["block_id"]
+                                
+                                # Create formatted text with "moved to tasks" prefix and strikethrough
+                                updated_rich_text = [
+                                    {
+                                        "type": "text",
+                                        "text": {
+                                            "content": "moved to tasks: ",
+                                            "link": None
+                                        },
+                                        "annotations": {
+                                            "bold": True,
+                                            "italic": False,
+                                            "strikethrough": False,
+                                            "underline": False,
+                                            "code": False,
+                                            "color": "default"
+                                        },
+                                        "plain_text": "moved to tasks: "
+                                    },
+                                    {
+                                        "type": "text",
+                                        "text": {
+                                            "content": original_text,
+                                            "link": None
+                                        },
+                                        "annotations": {
+                                            "bold": False,
+                                            "italic": False,
+                                            "strikethrough": True,
+                                            "underline": False,
+                                            "code": False,
+                                            "color": "default"
+                                        },
+                                        "plain_text": original_text
+                                    }
+                                ]
+                                
+                                # Update the block in Notion
+                                update_url = f"{self.notion.base_url}/blocks/{block_id}"
+                                update_payload = {
+                                    "to_do": {
+                                        "rich_text": updated_rich_text,
+                                        "checked": True,
+                                        "color": "default"
+                                    }
+                                }
+                                
+                                response = requests.patch(
+                                    update_url, 
+                                    headers=self.notion.headers, 
+                                    json=update_payload
+                                )
+                                
+                                if response.status_code == 200:
+                                    logger.info(f"Updated original todo block to mark as moved: '{original_text}'")
+                                    updated_block_ids.append(block_id)
+                                else:
+                                    logger.error(f"Failed to update original todo block: {response.text}")
+                            except Exception as e:
+                                logger.error(f"Error updating original todo block: {e}")
+                                import traceback
+                                logger.error(traceback.format_exc())
+                        
+                        # If we updated any blocks, we need to re-fetch the blocks to get the updated content
+                        if updated_block_ids:
+                            logger.info(f"Re-fetching blocks after marking todos as moved")
+                            blocks = self.notion.get_all_block_children(task_id)
                 
                 # Convert task properties to notebook properties
                 notebook_properties = self._map_task_to_notebook_properties(task)
@@ -896,7 +1077,156 @@ class TaskService:
         
         return updated_task
     
-    def _verify_data_transfer(self, task: Dict[str, Any], new_page: Dict[str, Any], notebook_properties: Dict[str, Any]):
+    def _extract_open_todos_from_task(self, task: Dict[str, Any], blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Extract uncompleted todos from the task's content blocks.
+        
+        Args:
+            task: The task page from Notion
+            blocks: The task's content blocks
+            
+        Returns:
+            List of dictionaries with todo text and new task properties
+        """
+        # Direct print to verify this method is called
+        print("======== _extract_open_todos_from_task METHOD CALLED ========")
+        logger.info("======== _extract_open_todos_from_task METHOD CALLED ========")
+        open_todos = []
+        task_title = self._get_title_from_page(task)
+        task_id = task.get("id", "unknown")
+        
+        # Direct debugging output - dump the task info
+        logger.info(f"EXTRACT: Starting todo extraction for task '{task_title}' (ID: {task_id})")
+        logger.info(f"EXTRACT: Found {len(blocks)} blocks to examine")
+        
+        # Get today's date for the new tasks' DoDate
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        # Debug log the block structure
+        logger.info(f"Analyzing {len(blocks)} blocks in task '{task_title}' (ID: {task_id})")
+        if not blocks:
+            logger.warning(f"No blocks found in task '{task_title}' (ID: {task_id})")
+            return []
+            
+        block_types = {}
+        for i, block in enumerate(blocks):
+            block_type = block.get("type", "unknown")
+            block_id = block.get("id", "unknown")
+            block_types[block_type] = block_types.get(block_type, 0) + 1
+            
+            # Debug output for each block
+            logger.info(f"Block {i+1}/{len(blocks)}: type={block_type}, id={block_id}")
+            
+            # Dump first 5 blocks completely for inspection
+            if i < 5:
+                # Use json.dumps to pretty print the block structure
+                block_str = json.dumps(block, indent=2, default=str)
+                logger.info(f"Block {i+1} structure:\n{block_str}")
+            
+            # Additional debug for todo blocks
+            if block_type == "to_do":
+                todo_content = block.get("to_do", {})
+                is_checked = todo_content.get("checked", False)
+                rich_text = todo_content.get("rich_text", [])
+                todo_text = ""
+                for text_item in rich_text:
+                    todo_text += text_item.get("plain_text", "")
+                logger.info(f"  TODO item: '{todo_text}', checked={is_checked}")
+        
+        # Log summary of block types
+        logger.info(f"Block type summary for task '{task_title}': {block_types}")
+        
+        # Loop through all blocks to find unchecked todo items
+        logger.info(f"Examining {len(blocks)} blocks for unchecked todos in task '{task_title}'")
+        for i, block in enumerate(blocks):
+            block_id = block.get("id", "unknown")
+            block_type = block.get("type", "unknown")
+            
+            # Log basic information about each block
+            logger.info(f"Processing block {i+1}/{len(blocks)}: type={block_type}, id={block_id}")
+            
+            if block_type == "to_do":
+                todo_content = block.get("to_do", {})
+                is_checked = todo_content.get("checked", False)
+                todo_text = ""
+                
+                # Extract the todo text
+                rich_text = todo_content.get("rich_text", [])
+                for text_item in rich_text:
+                    todo_text += text_item.get("plain_text", "")
+                
+                # Detailed debugging for the todo item
+                logger.info(f"EXTRACT: TODO item found: '{todo_text}', checked={is_checked}")
+                
+                # Dump the raw todo content for debugging
+                logger.info(f"EXTRACT: Raw todo content: {json.dumps(todo_content, indent=2, default=str)}")
+                
+                # Specific check for the checked field
+                if "checked" in todo_content:
+                    logger.info(f"EXTRACT: 'checked' field explicitly set to: {todo_content['checked']}")
+                else:
+                    logger.info(f"EXTRACT: 'checked' field not explicitly present in todo content")
+                
+                # If the todo is not checked, prepare a new task
+                if not is_checked and todo_text.strip():
+                    logger.info(f"Processing unchecked todo: '{todo_text.strip()}'")
+                    
+                    # Create new task properties (copy from original task)
+                    new_task_properties = {
+                        "title": {
+                            "title": [
+                                {
+                                    "type": "text",
+                                    "text": {"content": f"{task_title}: {todo_text.strip()}"}
+                                }
+                            ]
+                        },
+                        "Status": {
+                            "status": {"name": "ToDo"}
+                        },
+                        "DoDate": {
+                            "date": {"start": today}
+                        }
+                    }
+                    
+                    # Copy some properties from the original task if they exist
+                    original_properties = task.get("properties", {})
+                    
+                    # Copy Project relation if it exists
+                    if "Project" in original_properties and original_properties["Project"].get("relation"):
+                        new_task_properties["Project"] = {
+                            "relation": original_properties["Project"]["relation"]
+                        }
+                    
+                    # Copy Priority if it exists
+                    if "Priority" in original_properties and original_properties["Priority"].get("select"):
+                        new_task_properties["Priority"] = {
+                            "select": original_properties["Priority"]["select"]
+                        }
+                    
+                    # Copy Type if it exists
+                    if "Type" in original_properties and original_properties["Type"].get("select"):
+                        new_task_properties["Type"] = {
+                            "select": original_properties["Type"]["select"]
+                        }
+                    
+                    open_todos.append({
+                        "todo_text": todo_text.strip(),
+                        "properties": new_task_properties,
+                        "block_id": block.get("id")
+                    })
+                    
+                    logger.info(f"Found open todo: '{todo_text.strip()}'")
+                else:
+                    if is_checked:
+                        logger.info(f"Skipping checked todo: '{todo_text.strip()}'")
+                    elif not todo_text.strip():
+                        logger.info(f"Skipping empty todo")
+        
+        logger.info(f"Found {len(open_todos)} open todos in task '{task_title}'")
+        return open_todos
+    
+    def _verify_data_transfer(self, task: Dict[str, Any], new_page: Dict[str, Any], notebook_properties: Dict[str, Any]) -> bool:
         """
         Verify that the task data was properly transferred to the notebook page.
         Compare original task properties with the mapped notebook properties.
@@ -905,6 +1235,9 @@ class TaskService:
             task: The original task page from Notion
             new_page: The newly created notebook page
             notebook_properties: The properties mapped for the notebook page
+            
+        Returns:
+            True if the data transfer was successful, False otherwise
         """
         task_id = task.get("id", "unknown")
         notebook_id = new_page.get("id", "unknown")
