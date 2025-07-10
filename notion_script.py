@@ -338,12 +338,16 @@ class TaskService:
         # Convert task properties to notebook properties
         notebook_properties = self._map_task_to_notebook_properties(task)
         
-        # Create new page in notebook database with the mapped properties and content
+        # Filter out problematic blocks that might cause API validation errors
+        filtered_blocks = self._filter_safe_blocks(blocks)
+        logger.info(f"Filtered blocks: {len(blocks)} original blocks -> {len(filtered_blocks)} safe blocks")
+        
+        # Create new page in notebook database with the mapped properties and filtered content
         new_page = self.notion.create_page(
             parent_id=self.notebook_database_id,
             properties=notebook_properties,
             is_database=True,
-            children=blocks
+            children=filtered_blocks
         )
         
         # Handle the original task based on whether it's recurring or not
@@ -519,7 +523,7 @@ class TaskService:
                                 
                                 response = requests.patch(
                                     update_url, 
-                                    headers=self.notion.headers, 
+                                    headers=self.notion.headers,
                                     json=update_payload
                                 )
                                 
@@ -532,49 +536,6 @@ class TaskService:
                                 logger.error(f"Error updating original todo block: {e}")
                                 import traceback
                                 logger.error(traceback.format_exc())
-                        
-                        # If we updated any blocks, we need to re-fetch the blocks to get the updated content
-                        if updated_block_ids:
-                            logger.info(f"Re-fetching blocks after marking todos as moved")
-                            blocks = self.notion.get_all_block_children(task_id)
-                
-                # Convert task properties to notebook properties
-                notebook_properties = self._map_task_to_notebook_properties(task)
-                
-                # Get the task title for API
-                task_title = self._get_title_from_page(task)
-                logger.info(f"Passing task title to API: '{task_title}'")
-                
-                # Create new page in notebook database with the mapped properties and content
-                new_page = self.notion.create_page(
-                    parent_id=self.notebook_database_id,
-                    properties=notebook_properties,
-                    is_database=True,
-                    children=blocks if blocks else None,
-                    title_for_api=task_title
-                )
-                
-                # Verify that the task data was properly transferred
-                self._verify_data_transfer(task, new_page, notebook_properties)
-                
-                # Handle the original task based on whether it's recurring or not
-                if is_recurring:
-                    # Reset the task for the next occurrence
-                    updated_task = self._handle_recurring_task(task)
-                    logger.info(f"Reset recurring task {task_id} for next occurrence")
-                else:
-                    # Archive the original task
-                    self.notion.update_page(
-                        page_id=task_id,
-                        properties={
-                            status_id: {
-                                "status": {
-                                    "name": "Archived"
-                                }
-                            }
-                        },
-                        archived=False  # Not actually archiving in Notion, just updating status
-                    )
                     logger.info(f"Archived non-recurring task {task_id}")
                 
                 result = {
@@ -1114,6 +1075,63 @@ class TaskService:
         )
         
         return updated_task
+    
+    def _filter_safe_blocks(self, blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Filter blocks to remove or fix problematic content types that might cause API validation errors.
+        
+        Args:
+            blocks: The content blocks to filter
+            
+        Returns:
+            List of safe blocks that can be sent to the Notion API
+        """
+        if not blocks:
+            return []
+            
+        safe_blocks = []
+        
+        for block in blocks:
+            block_type = block.get("type", "unknown")
+            
+            # Skip problematic block types entirely
+            if block_type in ["table", "table_row"]:
+                logger.info(f"Skipping {block_type} block as it requires complex structure")
+                continue
+                
+            # Handle image blocks - check for valid URLs
+            if block_type == "image":
+                image_block = block.get("image", {})
+                image_type = image_block.get("type")
+                
+                # Skip images with cid: URLs or other invalid formats
+                if image_type == "external":
+                    url = image_block.get("external", {}).get("url", "")
+                    if url.startswith("cid:") or not url.startswith(("http://", "https://")):
+                        logger.info(f"Skipping image with invalid URL: {url}")
+                        continue
+            
+            # Handle rich text blocks with mentions
+            if block_type in ["paragraph", "bulleted_list_item", "numbered_list_item"]:
+                rich_text_field = block.get(block_type, {}).get("rich_text", [])
+                safe_rich_text = []
+                
+                for text_item in rich_text_field:
+                    # Skip mention type items which often cause validation errors
+                    if text_item.get("type") == "mention":
+                        logger.info("Skipping mention type in rich text as it requires complex structure")
+                        continue
+                    safe_rich_text.append(text_item)
+                
+                # Update the block with safe rich text
+                if safe_rich_text or not rich_text_field:
+                    if block_type in block:
+                        block[block_type]["rich_text"] = safe_rich_text
+            
+            # Add the potentially modified block to safe blocks
+            safe_blocks.append(block)
+        
+        return safe_blocks
     
     def _extract_open_todos_from_task(self, task: Dict[str, Any], blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
