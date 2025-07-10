@@ -828,14 +828,35 @@ class TaskService:
                 if "Project" in prop_id or "project" in prop_id.lower():
                     if relations:
                         logger.info(f"Found Project relation with {len(relations)} connected items: {relations}")
-                        task_properties_by_name["Project"] = {"type": prop_type, "value": relations, "raw": prop_data}
+                        logger.info(f"Project relation format details: {json.dumps(relations, indent=2)}")
+                        
+                        # Ensure relations are in the correct format for Notion API
+                        # Each relation should be an object with an 'id' key
+                        formatted_relations = []
+                        for relation in relations:
+                            # Check if relation is already in the correct format
+                            if isinstance(relation, dict) and 'id' in relation:
+                                formatted_relations.append(relation)
+                            # If it's just a string ID, convert it to the proper format
+                            elif isinstance(relation, str):
+                                formatted_relations.append({"id": relation})
+                            # If it's in some other format, try to extract the ID
+                            elif isinstance(relation, dict) and any(key for key in relation if 'id' in key.lower()):
+                                # Find the key that contains 'id'
+                                id_key = next(key for key in relation if 'id' in key.lower())
+                                formatted_relations.append({"id": relation[id_key]})
+                        
+                        logger.info(f"Formatted Project relations: {json.dumps(formatted_relations, indent=2)}")
+                        
+                        task_properties_by_name["Project"] = {"type": prop_type, "value": formatted_relations, "raw": prop_data}
                         property_types["Project"] = prop_type
                         
-                        # Directly set the Project relation in notebook properties
+                        # Directly set the Project relation in notebook properties with correct format
                         notebook_properties["Project"] = {
-                            "relation": relations
+                            "relation": formatted_relations
                         }
-                        logger.info(f"Directly setting Project relation with {len(relations)} items")
+                        logger.info(f"Directly setting Project relation with {len(formatted_relations)} items")
+                        logger.info(f"Final Project relation property format: {json.dumps(notebook_properties['Project'], indent=2)}")
                     else:
                         logger.info("Project relation found but no connected items")
             
@@ -921,10 +942,27 @@ class TaskService:
             elif prop_type == "relation":
                 relations = prop_data.get("relation", [])
                 if relations:
+                    # Format relations correctly for Notion API
+                    formatted_relations = []
+                    for relation in relations:
+                        # Check if relation is already in the correct format
+                        if isinstance(relation, dict) and 'id' in relation:
+                            formatted_relations.append(relation)
+                        # If it's just a string ID, convert it to the proper format
+                        elif isinstance(relation, str):
+                            formatted_relations.append({"id": relation})
+                        # If it's in some other format, try to extract the ID
+                        elif isinstance(relation, dict) and any(key for key in relation if 'id' in key.lower()):
+                            # Find the key that contains 'id'
+                            id_key = next(key for key in relation if 'id' in key.lower())
+                            formatted_relations.append({"id": relation[id_key]})
+                    
                     # Special handling for Project relation
                     if task_prop_name == "Project":
-                        logger.info(f"Found Project relation with {len(relations)} connected items: {relations}")
-                    notebook_properties[prop_key] = {"relation": relations}
+                        logger.info(f"Found Project relation with {len(formatted_relations)} connected items: {formatted_relations}")
+                    
+                    notebook_properties[prop_key] = {"relation": formatted_relations}
+                    logger.info(f"Set {task_prop_name} relation with {len(formatted_relations)} items")
                 else:
                     logger.info(f"{task_prop_name} relation found but no connected items")
                     
