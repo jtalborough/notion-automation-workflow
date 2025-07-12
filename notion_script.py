@@ -63,13 +63,26 @@ class NotionClientWrapper:
         if sorts:
             payload["sorts"] = sorts
             
-        response = requests.post(url, headers=self.headers, json=payload)
-        
-        if response.status_code != 200:
-            logger.error(f"Error querying database: {response.text}")
-            response.raise_for_status()
-            
-        return response.json().get("results", [])
+        all_results = []
+        has_more = True
+        next_cursor = None
+
+        while has_more:
+            if next_cursor:
+                payload["start_cursor"] = next_cursor
+
+            response = requests.post(url, headers=self.headers, json=payload)
+
+            if response.status_code != 200:
+                logger.error(f"Error querying database: {response.text}")
+                response.raise_for_status()
+
+            data = response.json()
+            all_results.extend(data.get("results", []))
+            has_more = data.get("has_more", False)
+            next_cursor = data.get("next_cursor")
+
+        return all_results
         
     def get_page(self, page_id: str) -> Dict[str, Any]:
         """Get a Notion page by its ID."""
@@ -250,7 +263,10 @@ class TaskService:
         logger.info(f"Successfully moved task {task_id} to notebook page {new_page['id']}")
 
         if is_recurring:
-            self._handle_recurring_task(task)
+            # If handling the recurring task fails, archive it
+            if not self._handle_recurring_task(task):
+                self.notion.update_page(page_id=task_id, archived=True)
+                logger.info(f"Archived recurring task with invalid pattern: {task_id}")
         else:
             self.notion.update_page(page_id=task_id, archived=True)
             logger.info(f"Archived non-recurring task {task_id}")
@@ -336,27 +352,26 @@ class TaskService:
                 return "monthly", {"day": int(m.group(1))}
         return None
 
-    def _handle_recurring_task(self, task: Dict[str, Any]):
-        """Resets a recurring task's due date and status."""
+    def _handle_recurring_task(self, task: Dict[str, Any]) -> bool:
+        """Resets a recurring task's due date and status. Returns True on success."""
         pattern_info = self._find_recurring_pattern(task)
         if not pattern_info:
             logger.warning(f"No recurring pattern found for task {task['id']}. Skipping reset.")
-            return
+            return False
 
         pattern_type, pattern_details = pattern_info
         next_date = self._calculate_next_date(pattern_type, pattern_details)
         if not next_date:
-            logger.error(f"Could not calculate next date for task {task['id']}")
-            return
+            logger.warning(f"Could not calculate next date for task {task['id']}. Skipping reset.")
+            return False
 
-        properties_to_update = {
+        new_properties = {
             "Status": {"status": {"name": "ToDo"}},
-            "Done": {"checkbox": False},
-            "DoDate": {"date": {"start": next_date.strftime("%Y-%m-%d")}},
-            "DoneDate": {"date": None}
+            "DoDate": {"date": {"start": next_date.strftime('%Y-%m-%d')}}
         }
-        self.notion.update_page(page_id=task["id"], properties=properties_to_update)
-        logger.info(f"Reset recurring task {task['id']}")
+        self.notion.update_page(task["id"], properties=new_properties)
+        logger.info(f"Reset recurring task {task['id']} to next date: {next_date.strftime('%Y-%m-%d')}")
+        return True
 
     def _calculate_next_date(self, pattern_type: str, details: dict) -> Optional[datetime]:
         """Calculates the next occurrence date for a recurring task."""
@@ -388,45 +403,41 @@ class TaskService:
         for block in blocks:
             block_type = block.get("type")
 
-            # Skip unsupported blocks entirely
+            # Rule 1: Skip unsupported block types entirely
             if block_type in ["unsupported", "child_database"]:
+                logger.warning(f"Skipping block of type '{block_type}' to avoid validation errors.")
                 continue
 
-            # Create a clean copy of the block
+            # Rule 2: For images, only allow those with external URLs
+            if block_type == "image":
+                image_type = block.get("image", {}).get("type")
+                if image_type == "file":
+                    logger.warning("Skipping 'image' block with a temporary Notion URL. Only external image URLs are supported.")
+                    continue
+
+            # If the block is safe, create a clean copy for the API
             safe_block = block.copy()
             for key in ["id", "created_by", "created_time", "last_edited_by", "last_edited_time", "parent"]:
                 safe_block.pop(key, None)
 
-            # Handle specific block types that can cause validation errors
-            if block_type == "image":
-                image_data = safe_block.get("image")
-                if not image_data:
-                    logger.warning(f"Skipping image block with no image data.")
-                    continue
+            # Rule 3: Recursively filter rich_text to remove invalid mentions
+            if block_type in safe_block and "rich_text" in safe_block[block_type]:
+                safe_rich_text = []
+                for rt_item in safe_block[block_type]["rich_text"]:
+                    if rt_item.get("type") == "mention":
+                        mention_data = rt_item.get("mention", {})
+                        if not any(key in mention_data for key in ["user", "page", "database", "date", "template_mention"]):
+                            logger.warning(f"Skipping malformed mention object: {rt_item}")
+                            continue
+                    safe_rich_text.append(rt_item)
+                safe_block[block_type]["rich_text"] = safe_rich_text
 
-                image_type = image_data.get("type")
-                if image_type == "external":
-                    # Ensure the external image has a URL
-                    if not image_data.get("external", {}).get("url"):
-                        logger.warning(f"Skipping external image block with no URL.")
-                        continue
-                elif image_type == "file":
-                    # File-based images have URLs that expire. It's safest to skip them when copying.
-                    logger.warning(f"Skipping file-based image to avoid expired URL issues.")
-                    continue
-                else:
-                    # If the image block is malformed or has an unknown type, skip it.
-                    logger.warning(f"Skipping malformed or unknown image block type.")
-                    continue
-
-            # Recursively filter children of blocks that have them
+            # Rule 4: Recursively filter children of blocks that have them
             if block.get("has_children"):
                 child_blocks = self.notion.get_all_block_children(block["id"])
-                # The API expects the children to be nested inside the block type key
                 if child_blocks:
                     safe_block[block_type]["children"] = self._filter_safe_blocks(child_blocks)
                 elif block_type in ["column_list", "synced_block"]:
-                    # If a column_list or synced_block has no children, it's invalid.
                     logger.warning(f"Skipping empty {block_type}: {block['id']}")
                     continue
 
