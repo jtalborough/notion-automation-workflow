@@ -477,6 +477,12 @@ class TaskService:
 
         return created_tasks
 
+    def get_database_schema(self, database_id: str) -> Dict[str, Any]:
+        """Retrieve the schema of a database."""
+        url = f"{self.notion.BASE_URL}/databases/{database_id}"
+        response = self.notion._make_request("GET", url)
+        return response.json()
+
 def main():
     """Main script execution."""
     try:
