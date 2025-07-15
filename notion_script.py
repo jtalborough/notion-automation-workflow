@@ -161,6 +161,15 @@ class NotionClientWrapper:
             
         return response.json()
         
+    def get_database_schema(self, database_id: str) -> Dict[str, Any]:
+        """Retrieve the schema of a database."""
+        url = f"{self.base_url}/databases/{database_id}"
+        response = requests.get(url, headers=self.headers)
+        if response.status_code != 200:
+            logger.error(f"Error getting database schema: {response.text}")
+            response.raise_for_status()
+        return response.json()
+
     def get_all_block_children(self, block_id: str) -> List[Dict[str, Any]]:
         """Get all child blocks of a block, handling pagination."""
         url = f"{self.base_url}/blocks/{block_id}/children"
@@ -222,8 +231,23 @@ class TaskService:
         self.task_database_id = TASK_DATABASE_ID
         self.notebook_database_id = NOTEBOOK_DATABASE_ID
         if not self.task_database_id or not self.notebook_database_id:
-            raise ValueError("TASK_DATABASE_ID and NOTEBOOK_DATABASE_ID must be set.")
+            raise ValueError("TASK_DATABASE_ID and NOTEBOOK_DATABASE_ID must be set")
+
+        # Fetch database schemas and find title property names
+        task_db_schema = self.notion.get_database_schema(self.task_database_id)
+        self.task_db_title_prop = self._get_title_property_name(task_db_schema)
+
+        notebook_db_schema = self.notion.get_database_schema(self.notebook_database_id)
+        self.notebook_db_title_prop = self._get_title_property_name(notebook_db_schema)
+
         self._validate_database_access()
+
+    def _get_title_property_name(self, schema: Dict[str, Any]) -> str:
+        """Find the title property name from a database schema."""
+        for prop_name, prop_details in schema.get("properties", {}).items():
+            if prop_details.get("type") == "title":
+                return prop_name
+        raise ValueError("Could not find title property in database schema")
 
     def _validate_database_access(self):
         """Validate that the databases exist and are accessible."""
@@ -311,11 +335,11 @@ class TaskService:
             "Project", "People", "URL", "Time", "Cost", "Done"
         ]
 
-        # 1. Handle the Title property. The destination property is 'Title'.
-        title_key = next((k for k, v in task_properties.items() if v.get('type') == 'title'), None)
-        if title_key:
-            plain_text_title = "".join(t.get("plain_text", "") for t in task_properties[title_key].get("title", []))
-            notebook_properties["Title"] = {"title": [{"text": {"content": plain_text_title}}]}
+        # 1. Handle the Title property dynamically.
+        task_title_content = task['properties'].get(self.task_db_title_prop, {}).get('title', [])
+        if task_title_content:
+            plain_text_title = "".join(t.get("plain_text", "") for t in task_title_content)
+            notebook_properties[self.notebook_db_title_prop] = {"title": [{"text": {"content": plain_text_title}}]}
 
         # 2. Handle all other properties based on the explicit map
         for prop_name in property_map:
@@ -444,6 +468,19 @@ class TaskService:
             safe_blocks.append(safe_block)
         return safe_blocks
 
+    def _map_task_to_new_task_properties(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Maps properties from an existing task to a new task, preserving key relations."""
+        task_properties = task.get("properties", {})
+        new_task_props = {}
+
+        # Preserve specific properties like Project, People, etc.
+        properties_to_keep = ["Project", "People", "Type", "Location"]
+        for prop_name in properties_to_keep:
+            if prop_name in task_properties:
+                new_task_props[prop_name] = task_properties[prop_name]
+
+        return new_task_props
+
     def _create_tasks_from_open_todos(self, task: Dict[str, Any], blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Creates new tasks from uncompleted to-do blocks."""
         created_tasks = []
@@ -453,8 +490,10 @@ class TaskService:
             todo_text = "".join(rt.get("plain_text", "") for rt in todo_block.get("to_do", {}).get("rich_text", []))
             if not todo_text: continue
 
-            new_task_props = self._map_task_to_notebook_properties(task)
-            new_task_props["Name"] = {"title": [{"text": {"content": todo_text}}]}
+            # Use the new mapping function for creating tasks
+            new_task_props = self._map_task_to_new_task_properties(task)
+            # Use the dynamic title property for the new task
+            new_task_props[self.task_db_title_prop] = {"title": [{"text": {"content": todo_text}}]}
             new_task_props["Status"] = {"status": {"name": "ToDo"}}
             new_task_props.pop("DoneDate", None)
             new_task_props.pop("DoDate", None)
@@ -477,11 +516,7 @@ class TaskService:
 
         return created_tasks
 
-    def get_database_schema(self, database_id: str) -> Dict[str, Any]:
-        """Retrieve the schema of a database."""
-        url = f"{self.notion.BASE_URL}/databases/{database_id}"
-        response = self.notion._make_request("GET", url)
-        return response.json()
+
 
 def main():
     """Main script execution."""
