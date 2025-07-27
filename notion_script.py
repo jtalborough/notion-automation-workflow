@@ -326,13 +326,7 @@ class TaskService:
     def _map_task_to_notebook_properties(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Maps properties from a task to the format for a new notebook page."""
         task_properties = task.get("properties", {})
-        logger.info(f"Available task properties: {list(task_properties.keys())}")
         notebook_properties = {}
-
-        # Log the content of the specific project relation property for debugging
-        source_project_relation_name = 'Related to ProjectsDB (1) (Tasks)'
-        project_property_content = task_properties.get(source_project_relation_name)
-        logger.info(f"Content of '{source_project_relation_name}': {project_property_content}")
 
         # Define the properties to copy from Task to Notebook
         # This ensures only specified properties are mapped.
@@ -488,11 +482,20 @@ class TaskService:
             todo_text = "".join(rt.get("plain_text", "") for rt in todo_block.get("to_do", {}).get("rich_text", []))
             if not todo_text: continue
 
-            new_task_props = self._map_task_to_notebook_properties(task)
-            new_task_props["Name"] = {"title": [{"text": {"content": todo_text}}]}
+            # Create a clean property set for the new sub-task
+            new_task_props = {}
+
+            # Set the title using the dynamic property name for the task database
+            new_task_props[self.task_db_title_prop] = {"title": [{"text": {"content": todo_text}}]}
+
+            # Set the status to 'ToDo'
             new_task_props["Status"] = {"status": {"name": "ToDo"}}
-            new_task_props.pop("DoneDate", None)
-            new_task_props.pop("DoDate", None)
+
+            # Copy the project relation from the parent task, if it exists
+            source_project_relation_name = 'Related to ProjectsDB (1) (Tasks)'
+            project_property = task.get("properties", {}).get(source_project_relation_name)
+            if project_property and project_property.get('relation') and project_property['relation']:
+                new_task_props['Project'] = {'relation': project_property['relation']}
 
             if self._is_recurring_task(task):
                 pattern_info = self._find_recurring_pattern(task)
