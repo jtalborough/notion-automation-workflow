@@ -326,6 +326,7 @@ class TaskService:
     def _map_task_to_notebook_properties(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Maps properties from a task to the format for a new notebook page."""
         task_properties = task.get("properties", {})
+        logger.info(f"Available task properties: {list(task_properties.keys())}")
         notebook_properties = {}
 
         # Define the properties to copy from Task to Notebook
