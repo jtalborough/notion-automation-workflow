@@ -31,9 +31,6 @@ jobs:
           TASK_DATABASE_ID: ${{ secrets.TASK_DATABASE_ID }}
           NOTEBOOK_DATABASE_ID: ${{ secrets.NOTEBOOK_DATABASE_ID }}
         run: python notion_script.py
-
-on:
-  push: # This triggers the workflow on push to any branch
   schedule:
     - cron: '0 5-21 * * *'  # Runs at the top of every hour from 5 AM to 9 PM daily
   workflow_dispatch: # Allows manual triggering from the GitHub UI
