@@ -311,28 +311,29 @@ class TaskService:
             "Project", "People", "URL", "Time", "Cost", "Done"
         ]
 
-        # 1. Handle the Title property. The destination property is 'Title'.
-        title_key = next((k for k, v in task_properties.items() if v.get('type') == 'title'), None)
-        if title_key:
-            plain_text_title = "".join(t.get("plain_text", "") for t in task_properties[title_key].get("title", []))
-            notebook_properties["Title"] = {"title": [{"text": {"content": plain_text_title}}]}
+        # 1. Handle the Title property dynamically.
+        task_title_content = task['properties'].get(self.task_db_title_prop, {}).get('title', [])
+        if task_title_content:
+            plain_text_title = "".join(t.get("plain_text", "") for t in task_title_content)
+            notebook_properties[self.notebook_db_title_prop] = {"title": [{"text": {"content": plain_text_title}}]}
 
-        # 2. Handle all other properties based on the explicit map
+        # 2. Explicitly handle the 'Project' relation property
+        if 'Project' in task_properties and task_properties['Project'].get('relation'):
+            # Ensure there is a relation to copy
+            if task_properties['Project']['relation']:
+                project_relation_id = task_properties['Project']['relation'][0]['id']
+                notebook_properties['Project'] = {'relation': [{'id': project_relation_id}]}
+
+        # 3. Handle all other properties based on the explicit map
         for prop_name in property_map:
-            if prop_name in task_properties:
-                prop_data = task_properties[prop_name]
-                prop_type = prop_data.get("type")
-                value = prop_data.get(prop_type)
-
-                # Ensure we don't copy empty values, which can cause validation errors
-                if value is not None:
-                    notebook_properties[prop_name] = {prop_type: value}
+            # Skip properties already handled to avoid overwriting
+            if prop_name in task_properties and prop_name not in [self.task_db_title_prop, 'Project']:
+                notebook_properties[prop_name] = task_properties[prop_name]
         
         logger.info(f"Mapped properties for notebook page: {list(notebook_properties.keys())}")
         return notebook_properties
 
-    def _is_recurring_task(self, task: Dict[str, Any]) -> bool:
-        """Checks if a task is recurring."""
+    # ... (rest of the class remains the same)
         properties = task.get("properties", {})
         if properties.get("Recurring", {}).get("formula", {}).get("boolean"): 
             return True
