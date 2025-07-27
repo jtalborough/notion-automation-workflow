@@ -326,7 +326,13 @@ class TaskService:
     def _map_task_to_notebook_properties(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Maps properties from a task to the format for a new notebook page."""
         task_properties = task.get("properties", {})
+        logger.info(f"Available task properties: {list(task_properties.keys())}")
         notebook_properties = {}
+
+        # Log the content of the specific project relation property for debugging
+        source_project_relation_name = 'Related to ProjectsDB (1) (Tasks)'
+        project_property_content = task_properties.get(source_project_relation_name)
+        logger.info(f"Content of '{source_project_relation_name}': {project_property_content}")
 
         # Define the properties to copy from Task to Notebook
         # This ensures only specified properties are mapped.
