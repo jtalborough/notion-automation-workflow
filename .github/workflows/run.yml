@@ -1,4 +1,36 @@
-name: Python Script Workflow
+name: Run Notion Automation Script
+
+on:
+  push:
+    branches:
+      - main
+      - test-project-fix # Or whichever branch you are working on
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11' # Using a more modern version of Python
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Python script
+        env:
+          NOTION_API_TOKEN: ${{ secrets.NOTION_API_TOKEN }}
+          TASK_DATABASE_ID: ${{ secrets.TASK_DATABASE_ID }}
+          NOTEBOOK_DATABASE_ID: ${{ secrets.NOTEBOOK_DATABASE_ID }}
+        run: python notion_script.py
 
 on:
   push: # This triggers the workflow on push to any branch
