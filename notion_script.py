@@ -342,11 +342,16 @@ class TaskService:
             notebook_properties[self.notebook_db_title_prop] = {"title": [{"text": {"content": plain_text_title}}]}
 
         # 2. Explicitly handle the 'Project' relation property
-        if 'Project' in task_properties and task_properties['Project'].get('relation'):
-            # Ensure there is a relation to copy
-            if task_properties['Project']['relation']:
-                project_relation_id = task_properties['Project']['relation'][0]['id']
+        project_property = task_properties.get('Project')
+        if project_property and project_property.get('relation'):
+            if project_property['relation']:
+                project_relation_id = project_property['relation'][0]['id']
                 notebook_properties['Project'] = {'relation': [{'id': project_relation_id}]}
+                logger.info(f"Found and mapped 'Project' relation: {project_relation_id}")
+            else:
+                logger.info("'Project' relation is present but empty, skipping.")
+        else:
+            logger.info("'Project' property not found or is not a relation, skipping.")
 
         # 3. Handle all other properties based on the explicit map
         for prop_name in property_map:
