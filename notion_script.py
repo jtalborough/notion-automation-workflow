@@ -326,33 +326,30 @@ class TaskService:
     def _map_task_to_notebook_properties(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Maps properties from a task to the format for a new notebook page."""
         task_properties = task.get("properties", {})
-        logger.info(f"Available task properties: {list(task_properties.keys())}")
         notebook_properties = {}
 
         # Define the properties to copy from Task to Notebook
-        # This ensures we only copy properties that exist and are expected
-        property_map = [
-            "Status", "Tag", "Priority", "Type", "Location", "DoneDate", "DoDate",
-            "Project", "People", "URL", "Time", "Cost", "Done"
-        ]
+        # This ensures only specified properties are mapped.
+        property_map = {
+            'Status', 'Priority', 'Type', 'Location', 'DoneDate', 'DoDate', 'People', 'URL', 'Time', 'Cost', 'Done'
+        }
 
-        # 1. Handle the Title property dynamically.
+        # 1. Dynamic title property handling
         task_title_content = task['properties'].get(self.task_db_title_prop, {}).get('title', [])
         if task_title_content:
             plain_text_title = "".join(t.get("plain_text", "") for t in task_title_content)
             notebook_properties[self.notebook_db_title_prop] = {"title": [{"text": {"content": plain_text_title}}]}
 
         # 2. Explicitly handle the 'Project' relation property
-        project_property = task_properties.get('Project')
+        # The source property name is what the API returns, which may be different from the UI.
+        source_project_relation_name = 'Related to ProjectsDB (1) (Tasks)'
+        project_property = task_properties.get(source_project_relation_name)
+
         if project_property and project_property.get('relation'):
             if project_property['relation']:
                 project_relation_id = project_property['relation'][0]['id']
+                # The destination property is 'Project'
                 notebook_properties['Project'] = {'relation': [{'id': project_relation_id}]}
-                logger.info(f"Found and mapped 'Project' relation: {project_relation_id}")
-            else:
-                logger.info("'Project' relation is present but empty, skipping.")
-        else:
-            logger.info("'Project' property not found or is not a relation, skipping.")
 
         # 3. Handle all other properties based on the explicit map
         for prop_name in property_map:
