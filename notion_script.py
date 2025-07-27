@@ -161,6 +161,15 @@ class NotionClientWrapper:
             
         return response.json()
         
+    def get_database_schema(self, database_id: str) -> Dict[str, Any]:
+        """Retrieve the schema of a database."""
+        url = f"{self.base_url}/databases/{database_id}"
+        response = requests.get(url, headers=self.headers)
+        if response.status_code != 200:
+            logger.error(f"Error getting database schema: {response.text}")
+            response.raise_for_status()
+        return response.json()
+
     def get_all_block_children(self, block_id: str) -> List[Dict[str, Any]]:
         """Get all child blocks of a block, handling pagination."""
         url = f"{self.base_url}/blocks/{block_id}/children"
@@ -222,8 +231,23 @@ class TaskService:
         self.task_database_id = TASK_DATABASE_ID
         self.notebook_database_id = NOTEBOOK_DATABASE_ID
         if not self.task_database_id or not self.notebook_database_id:
-            raise ValueError("TASK_DATABASE_ID and NOTEBOOK_DATABASE_ID must be set.")
+            raise ValueError("TASK_DATABASE_ID and NOTEBOOK_DATABASE_ID must be set")
+
+        # Fetch database schemas and find title property names
+        task_db_schema = self.notion.get_database_schema(self.task_database_id)
+        self.task_db_title_prop = self._get_title_property_name(task_db_schema)
+
+        notebook_db_schema = self.notion.get_database_schema(self.notebook_database_id)
+        self.notebook_db_title_prop = self._get_title_property_name(notebook_db_schema)
+
         self._validate_database_access()
+
+    def _get_title_property_name(self, schema: Dict[str, Any]) -> str:
+        """Find the title property name from a database schema."""
+        for prop_name, prop_details in schema.get("properties", {}).items():
+            if prop_details.get("type") == "title":
+                return prop_name
+        raise ValueError("Could not find title property in database schema")
 
     def _validate_database_access(self):
         """Validate that the databases exist and are accessible."""
@@ -333,7 +357,8 @@ class TaskService:
         logger.info(f"Mapped properties for notebook page: {list(notebook_properties.keys())}")
         return notebook_properties
 
-    # ... (rest of the class remains the same)
+    def _is_recurring_task(self, task: Dict[str, Any]) -> bool:
+        """Checks if a task is recurring."""
         properties = task.get("properties", {})
         if properties.get("Recurring", {}).get("formula", {}).get("boolean"): 
             return True
