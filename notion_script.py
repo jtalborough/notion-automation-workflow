@@ -340,24 +340,17 @@ class TaskService:
             plain_text_title = "".join(t.get("plain_text", "") for t in task_title_content)
             notebook_properties[self.notebook_db_title_prop] = {"title": [{"text": {"content": plain_text_title}}]}
 
-        # 2. Explicitly handle the 'Project' relation property for debugging
-        task_title_content = task['properties'].get(self.task_db_title_prop, {}).get('title', [])
-        plain_text_title = "".join(t.get("plain_text", "") for t in task_title_content)
-        logger.info(f"DEBUG: Processing task titled: '{plain_text_title}'")
-
+        # 2. Explicitly handle the 'Project' relation property
         source_project_relation_name = 'Project'
         project_property = task_properties.get(source_project_relation_name)
-        logger.info(f"DEBUG: Content of '{source_project_relation_name}' property: {project_property}")
 
-        if project_property and project_property.get('relation'):
+        # Check for the existence of the 'relation' key, not its truthiness
+        if project_property and project_property.get('relation') is not None:
+            # Check if the relation list is not empty
             if project_property['relation']:
                 project_relation_id = project_property['relation'][0]['id']
+                # The destination property is also named 'Project'
                 notebook_properties['Project'] = {'relation': [{'id': project_relation_id}]}
-                logger.info(f"DEBUG: SUCCESS - Mapped project relation for '{plain_text_title}'.")
-            else:
-                logger.info("DEBUG: SKIPPING - 'Project' property exists but the 'relation' list is empty.")
-        else:
-            logger.info("DEBUG: SKIPPING - 'Project' property not found or is not a relation type.")
 
         # 3. Handle all other properties based on the explicit map
         for prop_name in property_map:
