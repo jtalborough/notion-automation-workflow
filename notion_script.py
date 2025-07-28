@@ -341,15 +341,19 @@ class TaskService:
             notebook_properties[self.notebook_db_title_prop] = {"title": [{"text": {"content": plain_text_title}}]}
 
         # 2. Explicitly handle the 'Project' relation property
-        # The source property name is what the API returns, which may be different from the UI.
+        task_title_content = task['properties'].get(self.task_db_title_prop, {}).get('title', [])
+        plain_text_title = "".join(t.get("plain_text", "") for t in task_title_content)
+        logger.info(f"Processing task titled: '{plain_text_title}'")
+
         source_project_relation_name = 'Related to ProjectsDB (1) (Tasks)'
         project_property = task_properties.get(source_project_relation_name)
+        logger.info(f"Content of '{source_project_relation_name}' for task '{plain_text_title}': {project_property}")
 
         if project_property and project_property.get('relation'):
             if project_property['relation']:
                 project_relation_id = project_property['relation'][0]['id']
-                # The destination property is 'Project'
                 notebook_properties['Project'] = {'relation': [{'id': project_relation_id}]}
+                logger.info(f"SUCCESS: Mapped project relation for '{plain_text_title}'.")
 
         # 3. Handle all other properties based on the explicit map
         for prop_name in property_map:
