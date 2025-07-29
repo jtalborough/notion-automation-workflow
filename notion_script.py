@@ -264,10 +264,9 @@ class TaskService:
             logger.error(f"Failed to connect to the Notebook database: {e}")
             raise
 
-    def move_task_to_notebook(self, task_id: str) -> Dict[str, Any]:
+    def move_task_to_notebook(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Move a completed task to the Notebook DB and handle sub-tasks/archiving."""
-        logger.info(f"Fetching full page object for task: {task_id}")
-        task = self.notion.get_page(task_id)
+        task_id = task["id"]
         parent_db_id = task.get("parent", {}).get("database_id", "")
         if parent_db_id.replace("-", "") != self.task_database_id.replace("-", ""):
             raise ValueError(f"Task {task_id} is not from the task database")
@@ -310,12 +309,19 @@ class TaskService:
         logger.info(f"Found {len(done_tasks)} tasks to process.")
 
         recurring_results, non_recurring_results = [], []
-        for task in done_tasks:
-            task_id = task["id"]
+        for partial_task in done_tasks:
+            task_id = partial_task["id"]
             try:
                 logger.info(f"Processing task: {task_id}")
-                result = self.move_task_to_notebook(task_id)
-                if self._is_recurring_task(task):
+                # Fetch the full page object once to ensure all properties (like relations) are complete
+                logger.info(f"Fetching full page object for task: {task_id}")
+                full_task_obj = self.notion.get_page(task_id)
+
+                # Pass the full task object to be moved
+                result = self.move_task_to_notebook(full_task_obj)
+                
+                # Check recurrence using the full task object
+                if self._is_recurring_task(full_task_obj):
                     recurring_results.append(result)
                 else:
                     non_recurring_results.append(result)
@@ -342,16 +348,31 @@ class TaskService:
             notebook_properties[self.notebook_db_title_prop] = {"title": [{"text": {"content": plain_text_title}}]}
 
         # 2. Explicitly handle the 'Project' relation property
+        task_title_for_log = "".join(t.get("plain_text", "") for t in task['properties'].get(self.task_db_title_prop, {}).get('title', []))
+        logger.info(f"--- Project Relation Debug for task: '{task_title_for_log}' ---")
+
+        # Step 1: Look for the 'Project' Property
         source_project_relation_name = 'Project'
         project_property = task_properties.get(source_project_relation_name)
+        logger.info(f"[Step 1] Looking for '{source_project_relation_name}'. Found: {project_property is not None}")
+        if project_property:
+            logger.info(f"[Step 1b] Content of property: {project_property}")
 
-        # Check for the existence of the 'relation' key, not its truthiness
-        if project_property and project_property.get('relation') is not None:
-            # Check if the relation list is not empty
-            if project_property['relation']:
+        # Step 2: Verify the Property is a Valid Relation
+        is_valid_relation = project_property and project_property.get('relation') is not None
+        logger.info(f"[Step 2] Is it a valid relation property? {is_valid_relation}")
+
+        if is_valid_relation:
+            # Step 3: Check if a Project is Actually Linked
+            is_project_linked = bool(project_property.get('relation'))
+            logger.info(f"[Step 3] Is a project linked (relation list not empty)? {is_project_linked}")
+            if is_project_linked:
+                # Step 4: Get ID and Add to Notebook Properties
                 project_relation_id = project_property['relation'][0]['id']
-                # The destination property is also named 'Project'
+                logger.info(f"[Step 4] Extracted project page ID: {project_relation_id}")
                 notebook_properties['Project'] = {'relation': [{'id': project_relation_id}]}
+                logger.info(f"[Step 4b] SUCCESS: Added 'Project' to notebook properties.")
+        logger.info("--- End Project Relation Debug ---")
 
         # 3. Handle all other properties based on the explicit map
         for prop_name in property_map:
