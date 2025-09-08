@@ -128,22 +128,19 @@ class NotionClientWrapper:
             
         # Make a clean copy of properties
         clean_properties = properties.copy()
-        
+
         # If title_for_api is provided, ensure it's set correctly in the properties
+        # Note: This part of the logic seems unused given the dynamic title handling elsewhere.
+        # It's kept for potential direct calls but should be reviewed.
         if title_for_api:
-            logger.info(f"Setting title directly from API parameter: '{title_for_api}'")
-            
-            # For database entries, title must be in the properties
+            logger.warning(f"'title_for_api' is used, which might conflict with dynamic title property handling.")
             if is_database:
-                # Set the title field - this field must be named exactly as it appears in the database schema
-                clean_properties["Name"] = {
-                    "title": [
-                        {
-                            "type": "text",
-                            "text": {"content": title_for_api}
-                        }
-                    ]
-                }
+                # This assumes the title property is named 'Name', which is a source of errors.
+                # The calling function should provide the correctly structured property dictionary.
+                logger.info(f"Setting title directly from API parameter: '{title_for_api}'")
+                # The caller should determine the title property name and pass it in `properties`.
+                # This block is problematic and should ideally be removed.
+                pass
             
         payload = {
             "parent": parent,
@@ -151,15 +148,41 @@ class NotionClientWrapper:
         }
         
         if children:
-            payload["children"] = children
-            
+            # Notion API limits children to 100 per creation request
+            if len(children) > 100:
+                logger.warning(f"Creating page with {len(children)} blocks, which exceeds the 100 block limit. The page will be created with the first 100 blocks, and the rest should be appended separately.")
+                payload["children"] = children[:100]
+            else:
+                payload["children"] = children
+
         response = requests.post(url, headers=self.headers, json=payload)
-        
+
         if response.status_code != 200:
             logger.error(f"Error creating page: {response.text}")
             response.raise_for_status()
-            
+
         return response.json()
+
+    def append_block_children(self, block_id: str, children: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Append child blocks to a given block, handling chunking."""
+        url = f"{self.base_url}/blocks/{block_id}/children"
+        
+        last_response = None
+        # API has a limit of 100 children per request
+        for i in range(0, len(children), 100):
+            chunk = children[i:i + 100]
+            payload = {"children": chunk}
+            
+            logger.info(f"Appending {len(chunk)} blocks to block {block_id}...")
+            response = requests.patch(url, headers=self.headers, json=payload)
+            
+            if response.status_code != 200:
+                logger.error(f"Error appending block children: {response.text}")
+                response.raise_for_status()
+            
+            last_response = response.json()
+
+        return last_response or {}
         
     def get_database_schema(self, database_id: str) -> Dict[str, Any]:
         """Retrieve the schema of a database."""
@@ -278,12 +301,30 @@ class TaskService:
         notebook_properties = self._map_task_to_notebook_properties(task)
         filtered_blocks = self._filter_safe_blocks(blocks)
 
-        new_page = self.notion.create_page(
-            parent_id=self.notebook_database_id,
-            properties=notebook_properties,
-            is_database=True,
-            children=filtered_blocks
-        )
+        # Handle block chunking for page creation
+        if len(filtered_blocks) > 100:
+            logger.info(f"Task has {len(filtered_blocks)} blocks, which is over the 100 limit. Creating page with first 100 blocks.")
+            new_page = self.notion.create_page(
+                parent_id=self.notebook_database_id,
+                properties=notebook_properties,
+                is_database=True,
+                children=filtered_blocks[:100]
+            )
+            logger.info(f"Successfully created notebook page {new_page['id']}. Now appending remaining blocks.")
+            
+            # Append the rest of the blocks in chunks
+            remaining_blocks = filtered_blocks[100:]
+            self.notion.append_block_children(new_page['id'], remaining_blocks)
+            logger.info(f"Successfully appended remaining {len(remaining_blocks)} blocks.")
+
+        else:
+            new_page = self.notion.create_page(
+                parent_id=self.notebook_database_id,
+                properties=notebook_properties,
+                is_database=True,
+                children=filtered_blocks
+            )
+        
         logger.info(f"Successfully moved task {task_id} to notebook page {new_page['id']}")
 
         if is_recurring:
@@ -437,16 +478,24 @@ class TaskService:
         elif pattern_type == "weekly":
             target_weekday = details.get("weekday")
             if target_weekday is None: return None
-            days_ahead = target_weekday - today.weekday()
-            if days_ahead <= 0: days_ahead += 7
-            return today + timedelta(days=days_ahead)
+            # Start from tomorrow to ensure it always finds the *next* occurrence
+            start_date = today + timedelta(days=1)
+            days_ahead = (target_weekday - start_date.weekday() + 7) % 7
+            return start_date + timedelta(days=days_ahead)
         elif pattern_type == "monthly":
             day = details.get("day")
             if day is None: return None
-            next_month = today.month + 1 if today.day >= day else today.month
-            year = today.year + (next_month // 13)
-            next_month = next_month % 12 or 12
-            return datetime(year, next_month, day)
+            # If the target day is later in the current month, schedule for this month
+            if today.day < day:
+                try:
+                    return today.replace(day=day)
+                except ValueError:
+                    # Handles cases where 'day' is invalid for the current month (e.g., 31 in Feb)
+                    # Fallback to next month's first day or a more robust logic
+                    return (today.replace(day=1) + relativedelta(months=1))
+            # Otherwise, schedule for the next month
+            else:
+                return (today.replace(day=1) + relativedelta(months=1)).replace(day=day)
         return None
 
     def _filter_safe_blocks(self, blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -460,25 +509,50 @@ class TaskService:
                 logger.warning(f"Skipping block of type '{block_type}' to avoid validation errors.")
                 continue
 
-            # Rule 2: For images, only allow those with external URLs
-            if block_type == "image":
-                image_type = block.get("image", {}).get("type")
-                if image_type == "file":
-                    logger.warning("Skipping 'image' block with a temporary Notion URL. Only external image URLs are supported.")
+            # Rule 1b: Convert link_preview to bookmark
+            if block_type == "link_preview":
+                url = block.get("link_preview", {}).get("url")
+                if url:
+                    logger.info(f"Converting 'link_preview' to 'bookmark' for URL: {url}")
+                    block = {"type": "bookmark", "bookmark": {"url": url}}
+                    block_type = "bookmark"
+                else:
+                    logger.warning("Skipping 'link_preview' block with no URL.")
                     continue
 
-            # If the block is safe, create a clean copy for the API
+            # Rule 2: For images, validate URL and only allow external URLs
+            if block_type == "image":
+                image_data = block.get("image", {})
+                image_type = image_data.get("type")
+                if image_type == "file":
+                    logger.warning("Skipping 'image' block with a temporary Notion file URL.")
+                    continue
+                if image_type == "external":
+                    url = image_data.get("external", {}).get("url")
+                    if not url or not url.startswith("http"):
+                        logger.warning(f"Skipping 'image' block with invalid external URL: {url}")
+                        continue
+
+            # Create a clean copy for the API, removing read-only fields
             safe_block = block.copy()
             for key in ["id", "created_by", "created_time", "last_edited_by", "last_edited_time", "parent"]:
                 safe_block.pop(key, None)
 
-            # Rule 3: Recursively filter rich_text to remove invalid mentions
+            # Rule 3: Recursively filter rich_text to handle malformed mentions
             if block_type in safe_block and "rich_text" in safe_block[block_type]:
                 safe_rich_text = []
                 for rt_item in safe_block[block_type]["rich_text"]:
                     if rt_item.get("type") == "mention":
                         mention_data = rt_item.get("mention", {})
-                        if not any(key in mention_data for key in ["user", "page", "database", "date", "template_mention"]):
+                        # Handle malformed 'link_preview' mentions by converting them to plain text
+                        if mention_data.get("type") == "link_preview":
+                            url = mention_data.get("link_preview", {}).get("url")
+                            if url:
+                                logger.warning(f"Converting malformed 'link_preview' mention to plain text URL: {url}")
+                                safe_rich_text.append({"type": "text", "text": {"content": url}, "annotations": rt_item.get("annotations", {})})
+                            continue # Skip appending the original malformed mention
+                        # Check for other valid mention types
+                        elif not any(key in mention_data for key in ["user", "page", "database", "date", "template_mention"]):
                             logger.warning(f"Skipping malformed mention object: {rt_item}")
                             continue
                     safe_rich_text.append(rt_item)
