@@ -301,40 +301,63 @@ class TaskService:
         notebook_properties = self._map_task_to_notebook_properties(task)
         filtered_blocks = self._filter_safe_blocks(blocks)
 
-        # Handle block chunking for page creation
-        if len(filtered_blocks) > 100:
-            logger.info(f"Task has {len(filtered_blocks)} blocks, which is over the 100 limit. Creating page with first 100 blocks.")
-            new_page = self.notion.create_page(
-                parent_id=self.notebook_database_id,
-                properties=notebook_properties,
-                is_database=True,
-                children=filtered_blocks[:100]
-            )
-            logger.info(f"Successfully created notebook page {new_page['id']}. Now appending remaining blocks.")
-            
-            # Append the rest of the blocks in chunks
-            remaining_blocks = filtered_blocks[100:]
-            self.notion.append_block_children(new_page['id'], remaining_blocks)
-            logger.info(f"Successfully appended remaining {len(remaining_blocks)} blocks.")
-
-        else:
-            new_page = self.notion.create_page(
-                parent_id=self.notebook_database_id,
-                properties=notebook_properties,
-                is_database=True,
-                children=filtered_blocks
-            )
-        
-        logger.info(f"Successfully moved task {task_id} to notebook page {new_page['id']}")
+        # Prepare log blocks to be added to the new page
+        log_blocks = []
+        done_date_str = task.get("properties", {}).get("DoneDate", {}).get("date", {}).get("start")
+        if done_date_str:
+            # Format the date to be more readable if it's a full datetime string
+            try:
+                done_date = datetime.fromisoformat(done_date_str)
+                formatted_done_date = done_date.strftime('%Y-%m-%d @ %H:%M')
+                log_blocks.append(self._create_log_block(f"Completed on: {formatted_done_date}"))
+            except ValueError:
+                log_blocks.append(self._create_log_block(f"Completed on: {done_date_str}"))
 
         if is_recurring:
-            # If handling the recurring task fails, archive it
-            if not self._handle_recurring_task(task):
+            next_date = self._handle_recurring_task(task)
+            if next_date:
+                log_blocks.append(self._create_log_block(f"Reset to: {next_date.strftime('%Y-%m-%d')}"))
+                # Also append the log to the original task page for a running history
+                if log_blocks:
+                    logger.info(f"Appending completion log to original task {task_id}")
+                    # Create a divider for the original task log as well
+                    task_log_blocks = log_blocks + [self._create_divider_block()]
+                    self.notion.append_block_children(task_id, task_log_blocks)
+            else:
                 self.notion.update_page(page_id=task_id, archived=True)
                 logger.info(f"Archived recurring task with invalid pattern: {task_id}")
         else:
             self.notion.update_page(page_id=task_id, archived=True)
             logger.info(f"Archived non-recurring task {task_id}")
+
+        if log_blocks:
+            log_blocks.append(self._create_divider_block())
+
+        final_blocks = log_blocks + filtered_blocks
+
+        # Handle block chunking for page creation with final blocks
+        if len(final_blocks) > 100:
+            logger.info(f"Task has {len(final_blocks)} total blocks, which is over the 100 limit. Creating page with first 100 blocks.")
+            new_page = self.notion.create_page(
+                parent_id=self.notebook_database_id,
+                properties=notebook_properties,
+                is_database=True,
+                children=final_blocks[:100]
+            )
+            logger.info(f"Successfully created notebook page {new_page['id']}. Now appending remaining blocks.")
+            
+            remaining_blocks = final_blocks[100:]
+            self.notion.append_block_children(new_page['id'], remaining_blocks)
+            logger.info(f"Successfully appended remaining {len(remaining_blocks)} blocks.")
+        else:
+            new_page = self.notion.create_page(
+                parent_id=self.notebook_database_id,
+                properties=notebook_properties,
+                is_database=True,
+                children=final_blocks
+            )
+        
+        logger.info(f"Successfully moved task {task_id} to notebook page {new_page['id']}")
 
         return {
             "original_task_id": task_id,
@@ -429,12 +452,12 @@ class TaskService:
         properties = task.get("properties", {})
         if properties.get("Recurring", {}).get("formula", {}).get("boolean"): 
             return True
-        tags = properties.get("Tag", {}).get("multi_select", [])
+        tags = properties.get("Recurrence", {}).get("multi_select", [])
         return any(RECURRING_RELATIVE_PATTERN.match(t["name"]) or RECURRING_WEEKLY_PATTERN.match(t["name"]) or RECURRING_MONTHLY_PATTERN.match(t["name"]) for t in tags)
 
     def _find_recurring_pattern(self, task: Dict[str, Any]) -> Optional[Tuple[str, dict]]:
         """Finds the recurring pattern from a task's tags."""
-        tags = task.get("properties", {}).get("Tag", {}).get("multi_select", [])
+        tags = task.get("properties", {}).get("Recurrence", {}).get("multi_select", [])
         for tag in tags:
             name = tag.get("name", "")
             if m := RECURRING_RELATIVE_PATTERN.match(name):
@@ -445,18 +468,18 @@ class TaskService:
                 return "monthly", {"day": int(m.group(1))}
         return None
 
-    def _handle_recurring_task(self, task: Dict[str, Any]) -> bool:
-        """Resets a recurring task's due date and status. Returns True on success."""
+    def _handle_recurring_task(self, task: Dict[str, Any]) -> Optional[datetime]:
+        """Resets a recurring task's due date and status. Returns the next date on success."""
         pattern_info = self._find_recurring_pattern(task)
         if not pattern_info:
             logger.warning(f"No recurring pattern found for task {task['id']}. Skipping reset.")
-            return False
+            return None
 
         pattern_type, pattern_details = pattern_info
         next_date = self._calculate_next_date(pattern_type, pattern_details)
         if not next_date:
             logger.warning(f"Could not calculate next date for task {task['id']}. Skipping reset.")
-            return False
+            return None
 
         new_properties = {
             "Status": {"status": {"name": "ToDo"}},
@@ -464,7 +487,7 @@ class TaskService:
         }
         self.notion.update_page(task["id"], properties=new_properties)
         logger.info(f"Reset recurring task {task['id']} to next date: {next_date.strftime('%Y-%m-%d')}")
-        return True
+        return next_date
 
     def _calculate_next_date(self, pattern_type: str, details: dict) -> Optional[datetime]:
         """Calculates the next occurrence date for a recurring task."""
@@ -612,6 +635,29 @@ class TaskService:
 
         return created_tasks
 
+    def _create_log_block(self, text: str) -> Dict[str, Any]:
+        """Creates a paragraph block for logging information."""
+        return {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{
+                    "type": "text",
+                    "text": {
+                        "content": text
+                    }
+                }]
+            }
+        }
+
+    def _create_divider_block(self) -> Dict[str, Any]:
+        """Creates a divider block."""
+        return {
+            "object": "block",
+            "type": "divider",
+            "divider": {}
+        }
+
     def get_database_schema(self, database_id: str) -> Dict[str, Any]:
         """Retrieve the schema of a database."""
         url = f"{self.notion.BASE_URL}/databases/{database_id}"
@@ -624,6 +670,7 @@ def main():
         if not all([NOTION_API_TOKEN, TASK_DATABASE_ID, NOTEBOOK_DATABASE_ID]):
             print("Error: Missing one or more required environment variables.")
             return
+
 
         task_service = TaskService()
         print("Processing all completed tasks...")

@@ -14,4 +14,4 @@ source .env
 set +a
 
 # Run the script
-python notion_script.py
+./venv/bin/python notion_script.py
