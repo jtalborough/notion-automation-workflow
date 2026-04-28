@@ -459,6 +459,8 @@ class TaskService:
                     "Status": {"status": {"name": "ToDo"}},
                     "DoDate": {"date": {"start": next_date.strftime('%Y-%m-%d')}}
                 }
+                if task.get("properties", {}).get("Done", {}).get("type") == "checkbox":
+                    new_properties["Done"] = {"checkbox": False}
                 self.notion.update_page(task["id"], properties=new_properties)
                 logger.info(f"Reset recurring task {task['id']} to next date: {next_date.strftime('%Y-%m-%d')}")
                 if log_blocks:
