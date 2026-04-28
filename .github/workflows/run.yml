@@ -1,13 +1,26 @@
 name: Run Notion Automation Script
 
 on:
-  push:
-    branches:
-      - main
-      - test-project-fix
   schedule:
     - cron: '0 5-21 * * *'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode'
+        required: true
+        default: check
+        type: choice
+        options:
+          - check
+          - dry-run
+          - run
+      limit:
+        description: 'Optional max completed tasks to process'
+        required: false
+        type: number
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -32,4 +45,17 @@ jobs:
           TASK_DATABASE_ID: ${{ secrets.TASK_DATABASE_ID }}
           NOTEBOOK_DATABASE_ID: ${{ secrets.NOTEBOOK_DATABASE_ID }}
           NOTION_API_VERSION: ${{ vars.NOTION_API_VERSION }}
-        run: python notion_script.py
+        run: |
+          args=()
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            case "${{ inputs.mode }}" in
+              check) args+=(--check) ;;
+              dry-run) args+=(--dry-run) ;;
+              run) ;;
+              *) echo "Unknown mode: ${{ inputs.mode }}" >&2; exit 1 ;;
+            esac
+            if [ -n "${{ inputs.limit }}" ]; then
+              args+=(--limit "${{ inputs.limit }}")
+            fi
+          fi
+          python notion_script.py "${args[@]}"

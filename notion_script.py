@@ -353,6 +353,7 @@ class TaskService:
 
         notebook_db_schema = self.notion.get_database_schema(self.notebook_database_id)
         self.notebook_db_title_prop = self._get_title_property_name(notebook_db_schema)
+        self.notebook_property_names = set(notebook_db_schema.get("properties", {}).keys())
 
         self._validate_database_access()
 
@@ -396,7 +397,7 @@ class TaskService:
 
         is_recurring = self._is_recurring_task(task)
         blocks = self.notion.get_all_block_children(task_id)
-        created_todo_tasks = self._create_tasks_from_open_todos(task, blocks)
+        created_todo_tasks = []
 
         notebook_properties = self._map_task_to_notebook_properties(task)
         filtered_blocks = self._filter_safe_blocks(blocks)
@@ -414,22 +415,14 @@ class TaskService:
             except ValueError:
                 log_blocks.append(self._create_log_block(f"Completed on: {done_date_str}"))
 
+        next_date = None
         if is_recurring:
-            next_date = self._handle_recurring_task(task)
+            pattern_info = self._find_recurring_pattern(task)
+            if pattern_info:
+                pattern_type, pattern_details = pattern_info
+                next_date = self._calculate_next_date(pattern_type, pattern_details)
             if next_date:
                 log_blocks.append(self._create_log_block(f"Reset to: {next_date.strftime('%Y-%m-%d')}"))
-                # Also append the log to the original task page for a running history
-                if log_blocks:
-                    logger.info(f"Appending completion log to original task {task_id}")
-                    # Create a divider for the original task log as well
-                    task_log_blocks = log_blocks + [self._create_divider_block()]
-                    self.notion.append_block_children(task_id, task_log_blocks)
-            else:
-                self.notion.update_page(page_id=task_id, archived=True)
-                logger.info(f"Archived recurring task with invalid pattern: {task_id}")
-        else:
-            self.notion.update_page(page_id=task_id, archived=True)
-            logger.info(f"Archived non-recurring task {task_id}")
 
         if log_blocks:
             log_blocks.append(self._create_divider_block())
@@ -457,6 +450,27 @@ class TaskService:
                 is_database=True,
                 children=final_blocks
             )
+
+        created_todo_tasks = self._create_tasks_from_open_todos(task, blocks)
+
+        if is_recurring:
+            if next_date:
+                new_properties = {
+                    "Status": {"status": {"name": "ToDo"}},
+                    "DoDate": {"date": {"start": next_date.strftime('%Y-%m-%d')}}
+                }
+                self.notion.update_page(task["id"], properties=new_properties)
+                logger.info(f"Reset recurring task {task['id']} to next date: {next_date.strftime('%Y-%m-%d')}")
+                if log_blocks:
+                    logger.info(f"Appending completion log to original task {task_id}")
+                    task_log_blocks = log_blocks + [self._create_divider_block()]
+                    self.notion.append_block_children(task_id, task_log_blocks)
+            else:
+                self.notion.update_page(page_id=task_id, archived=True)
+                logger.info(f"Archived recurring task with invalid pattern: {task_id}")
+        else:
+            self.notion.update_page(page_id=task_id, archived=True)
+            logger.info(f"Archived non-recurring task {task_id}")
         
         logger.info(f"Successfully moved task {task_id} to notebook page {new_page['id']}")
 
@@ -529,7 +543,11 @@ class TaskService:
         # 3. Handle all other properties based on the explicit map
         for prop_name in property_map:
             # Skip properties already handled to avoid overwriting
-            if prop_name in task_properties and prop_name not in [self.task_db_title_prop, 'Project']:
+            if (
+                prop_name in task_properties
+                and prop_name in self.notebook_property_names
+                and prop_name not in [self.task_db_title_prop, 'Project']
+            ):
                 if not self._has_writable_property_value(task_properties[prop_name]):
                     continue
                 notebook_properties[prop_name] = task_properties[prop_name]
@@ -690,8 +708,16 @@ class TaskService:
                     logger.warning(f"Skipping empty {block_type}: {block['id']}")
                     continue
 
-            safe_blocks.append(safe_block)
+            safe_blocks.append(self._strip_null_values(safe_block))
         return safe_blocks
+
+    def _strip_null_values(self, value: Any) -> Any:
+        """Remove null fields from copied Notion API responses before create requests."""
+        if isinstance(value, dict):
+            return {k: self._strip_null_values(v) for k, v in value.items() if v is not None}
+        if isinstance(value, list):
+            return [self._strip_null_values(item) for item in value]
+        return value
 
     def _create_tasks_from_open_todos(self, task: Dict[str, Any], blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Creates new tasks from uncompleted to-do blocks."""
