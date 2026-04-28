@@ -24,14 +24,19 @@ Add these tags to your Notion tasks to set up recurring schedules:
 2. Set up your Notion workspace:
    - Create a Notion integration at https://www.notion.so/my-integrations
    - Copy your integration token
-   - Share your database with the integration
-   - Copy your database ID from its URL
+   - Share your task and notebook databases with the integration
+   - Copy each database ID from its URL
+   - If you set `NOTION_API_VERSION` to `2025-09-03` or newer, use Notion's "Copy data source ID" action for each database, or keep the database ID and let the script resolve the first data source automatically
 
 3. Configure GitHub repository secrets:
    - Go to Settings > Secrets and variables > Actions
-   - Add two secrets:
+   - Add three secrets:
      - `NOTION_API_TOKEN`: Your Notion integration token
-     - `NOTION_DATABASE_ID`: Your Notion database ID
+     - `TASK_DATABASE_ID`: Your task database or data source ID
+     - `NOTEBOOK_DATABASE_ID`: Your notebook database or data source ID
+   - Optional variable:
+     - `NOTION_API_VERSION`: Defaults to `2022-06-28`. Set to `2026-03-11` after confirming your IDs are data source-compatible.
+     - `NOTION_REQUEST_TIMEOUT`: Defaults to `30` seconds.
 
 4. Ensure your Notion database has these properties:
    - `Status`: Status property (for "Done" and "ToDo" states)
@@ -61,10 +66,26 @@ pip install -r requirements.txt
 3. Create a `.env` file with your credentials:
 ```
 NOTION_API_TOKEN=your_notion_api_token
-NOTION_DATABASE_ID=your_notion_database_id
+TASK_DATABASE_ID=your_task_database_or_data_source_id
+NOTEBOOK_DATABASE_ID=your_notebook_database_or_data_source_id
 ```
 
-4. Run the script:
+4. Check connectivity without changing Notion:
+```bash
+python notion_script.py --check
+```
+
+5. Preview the processing flow without writes:
+```bash
+python notion_script.py --dry-run
+```
+
+To dry-run only one completed task:
+```bash
+python notion_script.py --dry-run --limit 1
+```
+
+6. Run the script:
 ```bash
 python notion_script.py
 ```

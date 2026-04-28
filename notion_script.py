@@ -4,6 +4,9 @@ import re
 import json
 import logging
 import urllib.parse
+import argparse
+import calendar
+import sys
 from dotenv import load_dotenv
 from typing import Dict, List, Any, Optional, Tuple
 from dateutil.relativedelta import relativedelta
@@ -23,6 +26,8 @@ load_dotenv()
 NOTION_API_TOKEN = os.getenv("NOTION_API_TOKEN")
 TASK_DATABASE_ID = os.getenv("TASK_DATABASE_ID")
 NOTEBOOK_DATABASE_ID = os.getenv("NOTEBOOK_DATABASE_ID")
+NOTION_API_VERSION = os.getenv("NOTION_API_VERSION") or "2022-06-28"
+NOTION_REQUEST_TIMEOUT = float(os.getenv("NOTION_REQUEST_TIMEOUT") or "30")
 
 # Define patterns for recurring tasks
 RECURRING_RELATIVE_PATTERN = re.compile(r"rec[-_](\d+)([dwm])")
@@ -39,39 +44,99 @@ WEEKDAY_MAP = {
 class NotionClientWrapper:
     """Wrapper for the Notion API client to handle common operations."""
     
-    def __init__(self, api_token: Optional[str] = None):
+    def __init__(self, api_token: Optional[str] = None, api_version: Optional[str] = None, dry_run: bool = False):
         """Initialize the Notion client with an API token."""
         self.api_token = api_token or NOTION_API_TOKEN
         if not self.api_token:
             raise ValueError("NOTION_API_TOKEN must be set in environment variables")
-            
+        self.api_version = api_version or NOTION_API_VERSION
+        self.dry_run = dry_run
+        self.timeout = NOTION_REQUEST_TIMEOUT
         self.headers = {
             "Authorization": f"Bearer {self.api_token}",
             "Content-Type": "application/json",
-            "Notion-Version": "2022-06-28",
+            "Notion-Version": self.api_version,
         }
         self.base_url = "https://api.notion.com/v1"
+
+    @property
+    def uses_data_sources(self) -> bool:
+        """Whether this Notion API version uses data sources for database rows."""
+        return self.api_version >= "2025-09-03"
+
+    @property
+    def uses_in_trash(self) -> bool:
+        """Whether this Notion API version expects in_trash instead of archived."""
+        return self.api_version >= "2026-03-11"
+
+    def resolve_collection_id(self, collection_id: str) -> str:
+        """Return a data source ID for modern API versions, otherwise the database ID."""
+        if not self.uses_data_sources:
+            return collection_id
+
+        if self._resource_exists(f"{self.base_url}/data_sources/{collection_id}"):
+            return collection_id
+
+        response = requests.get(f"{self.base_url}/databases/{collection_id}", headers=self.headers, timeout=self.timeout)
+        if response.status_code != 200:
+            logger.error(f"Error resolving database/data source ID {collection_id}: {response.text}")
+            response.raise_for_status()
+
+        data_sources = response.json().get("data_sources", [])
+        if not data_sources:
+            raise ValueError(
+                f"Database {collection_id} did not expose any data sources. "
+                "Use Notion's 'Copy data source ID' action and set that as the database ID secret."
+            )
+        resolved_id = data_sources[0]["id"]
+        logger.info(f"Resolved database {collection_id} to data source {resolved_id}")
+        return resolved_id
+
+    def _resource_exists(self, url: str) -> bool:
+        """Check a resource URL without logging secret-bearing headers."""
+        response = requests.get(url, headers=self.headers, timeout=self.timeout)
+        if response.status_code == 200:
+            return True
+        if response.status_code == 404:
+            return False
+        logger.error(f"Error checking resource: {response.text}")
+        response.raise_for_status()
+        return False
         
-    def query_database(self, database_id: str, filter_dict: Optional[Dict] = None, 
-                       sorts: Optional[List] = None) -> List[Dict[str, Any]]:
+    def query_database(
+        self,
+        database_id: str,
+        filter_dict: Optional[Dict] = None,
+        sorts: Optional[List] = None,
+        page_size: Optional[int] = None,
+        max_pages: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """Query a Notion database with optional filters and sorts."""
-        url = f"{self.base_url}/databases/{database_id}/query"
+        if self.uses_data_sources:
+            url = f"{self.base_url}/data_sources/{database_id}/query"
+        else:
+            url = f"{self.base_url}/databases/{database_id}/query"
         
         payload = {}
         if filter_dict:
             payload["filter"] = filter_dict
         if sorts:
             payload["sorts"] = sorts
+        if page_size:
+            payload["page_size"] = page_size
             
         all_results = []
         has_more = True
         next_cursor = None
+        pages_fetched = 0
 
         while has_more:
+            if max_pages is not None and pages_fetched >= max_pages:
+                break
             if next_cursor:
                 payload["start_cursor"] = next_cursor
 
-            response = requests.post(url, headers=self.headers, json=payload)
+            response = requests.post(url, headers=self.headers, json=payload, timeout=self.timeout)
 
             if response.status_code != 200:
                 logger.error(f"Error querying database: {response.text}")
@@ -81,6 +146,7 @@ class NotionClientWrapper:
             all_results.extend(data.get("results", []))
             has_more = data.get("has_more", False)
             next_cursor = data.get("next_cursor")
+            pages_fetched += 1
 
         return all_results
         
@@ -88,7 +154,7 @@ class NotionClientWrapper:
         """Get a Notion page by its ID."""
         url = f"{self.base_url}/pages/{page_id}"
         
-        response = requests.get(url, headers=self.headers)
+        response = requests.get(url, headers=self.headers, timeout=self.timeout)
         
         if response.status_code != 200:
             logger.error(f"Error getting page: {response.text}")
@@ -105,9 +171,13 @@ class NotionClientWrapper:
         if properties is not None:
             payload["properties"] = properties
         if archived is not None:
-            payload["archived"] = archived
+            payload["in_trash" if self.uses_in_trash else "archived"] = archived
+
+        if self.dry_run:
+            logger.info(f"[dry-run] Would update page {page_id}: {json.dumps(payload, default=str)}")
+            return {"id": page_id, "object": "page", "dry_run": True}
             
-        response = requests.patch(url, headers=self.headers, json=payload)
+        response = requests.patch(url, headers=self.headers, json=payload, timeout=self.timeout)
         
         if response.status_code != 200:
             logger.error(f"Error updating page: {response.text}")
@@ -122,7 +192,7 @@ class NotionClientWrapper:
         
         parent = {}
         if is_database:
-            parent = {"database_id": parent_id}
+            parent = {"data_source_id": parent_id} if self.uses_data_sources else {"database_id": parent_id}
         else:
             parent = {"page_id": parent_id}
             
@@ -155,7 +225,12 @@ class NotionClientWrapper:
             else:
                 payload["children"] = children
 
-        response = requests.post(url, headers=self.headers, json=payload)
+        if self.dry_run:
+            fake_id = f"dry-run-page-{abs(hash(json.dumps(payload, sort_keys=True, default=str)))}"
+            logger.info(f"[dry-run] Would create page under {parent}: {list(clean_properties.keys())}")
+            return {"id": fake_id, "object": "page", "dry_run": True}
+
+        response = requests.post(url, headers=self.headers, json=payload, timeout=self.timeout)
 
         if response.status_code != 200:
             logger.error(f"Error creating page: {response.text}")
@@ -174,7 +249,11 @@ class NotionClientWrapper:
             payload = {"children": chunk}
             
             logger.info(f"Appending {len(chunk)} blocks to block {block_id}...")
-            response = requests.patch(url, headers=self.headers, json=payload)
+            if self.dry_run:
+                logger.info(f"[dry-run] Would append {len(chunk)} blocks to block {block_id}")
+                last_response = {"object": "list", "results": [], "dry_run": True}
+                continue
+            response = requests.patch(url, headers=self.headers, json=payload, timeout=self.timeout)
             
             if response.status_code != 200:
                 logger.error(f"Error appending block children: {response.text}")
@@ -186,8 +265,11 @@ class NotionClientWrapper:
         
     def get_database_schema(self, database_id: str) -> Dict[str, Any]:
         """Retrieve the schema of a database."""
-        url = f"{self.base_url}/databases/{database_id}"
-        response = requests.get(url, headers=self.headers)
+        if self.uses_data_sources:
+            url = f"{self.base_url}/data_sources/{database_id}"
+        else:
+            url = f"{self.base_url}/databases/{database_id}"
+        response = requests.get(url, headers=self.headers, timeout=self.timeout)
         if response.status_code != 200:
             logger.error(f"Error getting database schema: {response.text}")
             response.raise_for_status()
@@ -209,7 +291,7 @@ class NotionClientWrapper:
                 params["start_cursor"] = start_cursor
                 
             logger.info(f"Making API request to {url} for blocks")
-            response = requests.get(url, headers=self.headers, params=params)
+            response = requests.get(url, headers=self.headers, params=params, timeout=self.timeout)
             
             if response.status_code != 200:
                 logger.error(f"Error getting block children: {response.text}")
@@ -248,13 +330,22 @@ class NotionClientWrapper:
 class TaskService:
     """Service for handling task operations in Notion."""
 
-    def __init__(self, notion_client: Optional[NotionClientWrapper] = None):
+    def __init__(
+        self,
+        notion_client: Optional[NotionClientWrapper] = None,
+        task_database_id: Optional[str] = None,
+        notebook_database_id: Optional[str] = None,
+    ):
         """Initialize the task service with a Notion client."""
         self.notion = notion_client or NotionClientWrapper()
-        self.task_database_id = TASK_DATABASE_ID
-        self.notebook_database_id = NOTEBOOK_DATABASE_ID
+        self.task_database_id = task_database_id or TASK_DATABASE_ID
+        self.notebook_database_id = notebook_database_id or NOTEBOOK_DATABASE_ID
         if not self.task_database_id or not self.notebook_database_id:
             raise ValueError("TASK_DATABASE_ID and NOTEBOOK_DATABASE_ID must be set")
+
+        self.task_database_id = self.notion.resolve_collection_id(self.task_database_id)
+        self.notebook_database_id = self.notion.resolve_collection_id(self.notebook_database_id)
+        self.errors: List[Tuple[str, Exception]] = []
 
         # Fetch database schemas and find title property names
         task_db_schema = self.notion.get_database_schema(self.task_database_id)
@@ -275,13 +366,21 @@ class TaskService:
     def _validate_database_access(self):
         """Validate that the databases exist and are accessible."""
         try:
-            self.notion.query_database(self.task_database_id, sorts=[{"property": "Created", "direction": "descending"}])
+            self.notion.query_database(
+                self.task_database_id,
+                page_size=1,
+                max_pages=1,
+            )
             logger.info("Successfully connected to the Task database.")
         except Exception as e:
             logger.error(f"Failed to connect to the Task database: {e}")
             raise
         try:
-            self.notion.query_database(self.notebook_database_id, sorts=[{"property": "Created", "direction": "descending"}])
+            self.notion.query_database(
+                self.notebook_database_id,
+                page_size=1,
+                max_pages=1,
+            )
             logger.info("Successfully connected to the Notebook database.")
         except Exception as e:
             logger.error(f"Failed to connect to the Notebook database: {e}")
@@ -290,7 +389,8 @@ class TaskService:
     def move_task_to_notebook(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Move a completed task to the Notebook DB and handle sub-tasks/archiving."""
         task_id = task["id"]
-        parent_db_id = task.get("parent", {}).get("database_id", "")
+        parent = task.get("parent", {})
+        parent_db_id = parent.get("data_source_id") or parent.get("database_id", "")
         if parent_db_id.replace("-", "") != self.task_database_id.replace("-", ""):
             raise ValueError(f"Task {task_id} is not from the task database")
 
@@ -303,7 +403,8 @@ class TaskService:
 
         # Prepare log blocks to be added to the new page
         log_blocks = []
-        done_date_str = task.get("properties", {}).get("DoneDate", {}).get("date", {}).get("start")
+        done_date = task.get("properties", {}).get("DoneDate", {}).get("date") or {}
+        done_date_str = done_date.get("start")
         if done_date_str:
             # Format the date to be more readable if it's a full datetime string
             try:
@@ -365,11 +466,13 @@ class TaskService:
             "created_todo_tasks": created_todo_tasks
         }
 
-    def process_all_completed_tasks(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    def process_all_completed_tasks(self, limit: Optional[int] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Finds and processes all 'Done' tasks."""
         filter_dict = {"property": "Status", "status": {"equals": "Done"}}
         logger.info("Querying for tasks with status 'Done'")
         done_tasks = self.notion.query_database(self.task_database_id, filter_dict)
+        if limit is not None:
+            done_tasks = done_tasks[:limit]
         logger.info(f"Found {len(done_tasks)} tasks to process.")
 
         recurring_results, non_recurring_results = [], []
@@ -391,6 +494,7 @@ class TaskService:
                     non_recurring_results.append(result)
             except Exception as e:
                 logger.error(f"Failed to process task {task_id}: {e}", exc_info=True)
+                self.errors.append((task_id, e))
 
         return recurring_results, non_recurring_results
 
@@ -412,40 +516,33 @@ class TaskService:
             notebook_properties[self.notebook_db_title_prop] = {"title": [{"text": {"content": plain_text_title}}]}
 
         # 2. Explicitly handle the 'Project' relation property
-        task_title_for_log = "".join(t.get("plain_text", "") for t in task['properties'].get(self.task_db_title_prop, {}).get('title', []))
-        logger.info(f"--- Project Relation Debug for task: '{task_title_for_log}' ---")
-
-        # Step 1: Look for the 'Project' Property
         source_project_relation_name = 'Project'
         project_property = task_properties.get(source_project_relation_name)
-        logger.info(f"[Step 1] Looking for '{source_project_relation_name}'. Found: {project_property is not None}")
-        if project_property:
-            logger.info(f"[Step 1b] Content of property: {project_property}")
-
-        # Step 2: Verify the Property is a Valid Relation
         is_valid_relation = project_property and project_property.get('relation') is not None
-        logger.info(f"[Step 2] Is it a valid relation property? {is_valid_relation}")
 
         if is_valid_relation:
-            # Step 3: Check if a Project is Actually Linked
-            is_project_linked = bool(project_property.get('relation'))
-            logger.info(f"[Step 3] Is a project linked (relation list not empty)? {is_project_linked}")
-            if is_project_linked:
-                # Step 4: Get ID and Add to Notebook Properties
+            if project_property.get('relation'):
                 project_relation_id = project_property['relation'][0]['id']
-                logger.info(f"[Step 4] Extracted project page ID: {project_relation_id}")
                 notebook_properties['Project'] = {'relation': [{'id': project_relation_id}]}
-                logger.info(f"[Step 4b] SUCCESS: Added 'Project' to notebook properties.")
-        logger.info("--- End Project Relation Debug ---")
+                logger.info("Mapped Project relation to notebook page.")
 
         # 3. Handle all other properties based on the explicit map
         for prop_name in property_map:
             # Skip properties already handled to avoid overwriting
             if prop_name in task_properties and prop_name not in [self.task_db_title_prop, 'Project']:
+                if not self._has_writable_property_value(task_properties[prop_name]):
+                    continue
                 notebook_properties[prop_name] = task_properties[prop_name]
         
         logger.info(f"Mapped properties for notebook page: {list(notebook_properties.keys())}")
         return notebook_properties
+
+    def _has_writable_property_value(self, property_value: Dict[str, Any]) -> bool:
+        """Skip empty Notion property values that cannot be written into a new page."""
+        prop_type = property_value.get("type")
+        if not prop_type:
+            return False
+        return property_value.get(prop_type) is not None
 
     def _is_recurring_task(self, task: Dict[str, Any]) -> bool:
         """Checks if a task is recurring."""
@@ -510,16 +607,16 @@ class TaskService:
             if day is None: return None
             # If the target day is later in the current month, schedule for this month
             if today.day < day:
-                try:
-                    return today.replace(day=day)
-                except ValueError:
-                    # Handles cases where 'day' is invalid for the current month (e.g., 31 in Feb)
-                    # Fallback to next month's first day or a more robust logic
-                    return (today.replace(day=1) + relativedelta(months=1))
+                return self._date_for_monthly_day(today, day)
             # Otherwise, schedule for the next month
             else:
-                return (today.replace(day=1) + relativedelta(months=1)).replace(day=day)
+                return self._date_for_monthly_day(today.replace(day=1) + relativedelta(months=1), day)
         return None
+
+    def _date_for_monthly_day(self, base_date: datetime, requested_day: int) -> datetime:
+        """Return the requested day in base_date's month, clamped to month end."""
+        last_day = calendar.monthrange(base_date.year, base_date.month)[1]
+        return base_date.replace(day=min(requested_day, last_day))
 
     def _filter_safe_blocks(self, blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Recursively removes unsupported blocks and problematic keys."""
@@ -558,7 +655,10 @@ class TaskService:
 
             # Create a clean copy for the API, removing read-only fields
             safe_block = block.copy()
-            for key in ["id", "created_by", "created_time", "last_edited_by", "last_edited_time", "parent"]:
+            for key in [
+                "id", "object", "created_by", "created_time", "last_edited_by",
+                "last_edited_time", "parent", "archived", "in_trash", "has_children"
+            ]:
                 safe_block.pop(key, None)
 
             # Rule 3: Recursively filter rich_text to handle malformed mentions
@@ -631,7 +731,7 @@ class TaskService:
                 is_database=True
             )
             created_tasks.append(new_task)
-            logger.info(f"Created new task {new_task['id']} from open to-do: '{todo_text}'")
+            logger.info(f"Created new task {new_task['id']} from open to-do block.")
 
         return created_tasks
 
@@ -658,28 +758,63 @@ class TaskService:
             "divider": {}
         }
 
-    def get_database_schema(self, database_id: str) -> Dict[str, Any]:
-        """Retrieve the schema of a database."""
-        url = f"{self.notion.BASE_URL}/databases/{database_id}"
-        response = self.notion._make_request("GET", url)
-        return response.json()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Process completed recurring tasks in Notion.")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate credentials, schema access, and the completed-task query without changing Notion.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run the processing flow but log intended Notion writes instead of creating, updating, or appending.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Process at most this many completed tasks. Useful with --dry-run for validation.",
+    )
+    return parser.parse_args()
+
 
 def main():
     """Main script execution."""
+    args = parse_args()
     try:
         if not all([NOTION_API_TOKEN, TASK_DATABASE_ID, NOTEBOOK_DATABASE_ID]):
             print("Error: Missing one or more required environment variables.")
+            sys.exit(1)
+
+        notion_client = NotionClientWrapper(dry_run=args.dry_run)
+        task_service = TaskService(notion_client=notion_client)
+
+        if args.check:
+            print("Connection check passed.")
+            print(f"Notion API version: {notion_client.api_version}")
+            print(f"Task collection ID: {task_service.task_database_id}")
+            print(f"Notebook collection ID: {task_service.notebook_database_id}")
+            done_tasks = task_service.notion.query_database(
+                task_service.task_database_id,
+                {"property": "Status", "status": {"equals": "Done"}},
+                page_size=1,
+                max_pages=1,
+            )
+            print(f"Completed-task query passed; first page returned {len(done_tasks)} item(s).")
             return
 
-
-        task_service = TaskService()
         print("Processing all completed tasks...")
-        recurring, non_recurring = task_service.process_all_completed_tasks()
+        if args.dry_run:
+            print("Dry run enabled: Notion writes will be logged but not sent.")
+        recurring, non_recurring = task_service.process_all_completed_tasks(limit=args.limit)
 
         print(f"\nProcessed {len(recurring)} recurring tasks.")
         print(f"Processed {len(non_recurring)} non-recurring tasks.")
         total = len(recurring) + len(non_recurring)
         print(f"Total tasks processed: {total}")
+        if task_service.errors:
+            failed_ids = ", ".join(task_id for task_id, _ in task_service.errors)
+            raise RuntimeError(f"Failed to process {len(task_service.errors)} task(s): {failed_ids}")
 
         if total > 0:
             print("\n--- Detailed Results ---")
@@ -695,6 +830,7 @@ def main():
     except Exception as e:
         logger.error(f"An unexpected error occurred in main execution: {e}", exc_info=True)
         print(f"An unexpected error occurred. See logs for details.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

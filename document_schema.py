@@ -9,6 +9,7 @@ import json
 import logging
 import requests
 from typing import Dict, Any, List, Optional
+from notion_script import NotionClientWrapper
 
 # Set up logging
 logging.basicConfig(
@@ -21,13 +22,14 @@ class NotionSchemaDocumenter:
     def __init__(self):
         """Initialize the Notion Schema Documenter."""
         self.api_token = os.environ.get("NOTION_API_TOKEN")
-        self.task_database_id = os.environ.get("TASK_DATABASE_ID", "a3b073d5b30d48089bd9eb62ed180e15")
-        self.notebook_database_id = os.environ.get("NOTEBOOK_DATABASE_ID", "1f5d6c20dc718089ae02eea25fb480f5")
-        self.headers = {
-            "Authorization": f"Bearer {self.api_token}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json"
-        }
+        self.task_database_id = os.environ.get("TASK_DATABASE_ID")
+        self.notebook_database_id = os.environ.get("NOTEBOOK_DATABASE_ID")
+        if not all([self.api_token, self.task_database_id, self.notebook_database_id]):
+            raise ValueError("NOTION_API_TOKEN, TASK_DATABASE_ID, and NOTEBOOK_DATABASE_ID must be set")
+        self.notion = NotionClientWrapper(api_token=self.api_token)
+        self.task_database_id = self.notion.resolve_collection_id(self.task_database_id)
+        self.notebook_database_id = self.notion.resolve_collection_id(self.notebook_database_id)
+        self.include_raw_schema = os.environ.get("INCLUDE_RAW_SCHEMA", "").lower() in {"1", "true", "yes"}
 
     def document_database_schema(self, database_id: str) -> Dict[str, Any]:
         """
@@ -39,19 +41,14 @@ class NotionSchemaDocumenter:
         Returns:
             Dictionary containing the database properties and their details
         """
-        url = f"https://api.notion.com/v1/databases/{database_id}"
-        
         try:
-            response = requests.get(url, headers=self.headers)
-            response.raise_for_status()
-            
-            data = response.json()
+            data = self.notion.get_database_schema(database_id)
             database_name = data.get("title", [{}])[0].get("plain_text", "Unknown Database")
             
             # Extract properties
             properties = {}
             for prop_id, prop_details in data.get("properties", {}).items():
-                prop_name = prop_details.get("name", "")
+                prop_name = prop_details.get("name", prop_id)
                 prop_type = prop_details.get("type", "unknown")
                 
                 property_info = {
@@ -73,7 +70,7 @@ class NotionSchemaDocumenter:
             return {
                 "database_name": database_name,
                 "properties": properties,
-                "raw_response": data  # Include the complete Notion API response
+                "raw_response": data if self.include_raw_schema else {}
             }
             
         except requests.exceptions.HTTPError as e:
@@ -154,12 +151,13 @@ class NotionSchemaDocumenter:
         
         file_path = os.path.join(schema_dir, filename)
         
-        # Create a structured version including both the extracted schema and raw API response
+        # Keep generated schema files suitable for a public repo by default.
         output_data = {
             "database_name": schema.get("database_name"),
             "properties": schema.get("properties", {}),
-            "raw_api_response": schema.get("raw_response", {})  # Include the full API response
         }
+        if self.include_raw_schema:
+            output_data["raw_api_response"] = schema.get("raw_response", {})
         
         try:
             with open(file_path, 'w') as f:
