@@ -388,7 +388,7 @@ class TaskService:
             raise
 
     def move_task_to_notebook(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        """Move a completed task to the Notebook DB and handle sub-tasks/archiving."""
+        """Move a completed task to the Notebook DB and mark the task processed."""
         task_id = task["id"]
         parent = task.get("parent", {})
         parent_db_id = parent.get("data_source_id") or parent.get("database_id", "")
@@ -468,11 +468,17 @@ class TaskService:
                     task_log_blocks = log_blocks + [self._create_divider_block()]
                     self.notion.append_block_children(task_id, task_log_blocks)
             else:
-                self.notion.update_page(page_id=task_id, archived=True)
-                logger.info(f"Archived recurring task with invalid pattern: {task_id}")
+                self.notion.update_page(
+                    page_id=task_id,
+                    properties={"Status": {"status": {"name": "Archived"}}},
+                )
+                logger.info(f"Marked recurring task with invalid pattern as Archived: {task_id}")
         else:
-            self.notion.update_page(page_id=task_id, archived=True)
-            logger.info(f"Archived non-recurring task {task_id}")
+            self.notion.update_page(
+                page_id=task_id,
+                properties={"Status": {"status": {"name": "Archived"}}},
+            )
+            logger.info(f"Marked non-recurring task as Archived: {task_id}")
         
         logger.info(f"Successfully moved task {task_id} to notebook page {new_page['id']}")
 
@@ -486,7 +492,14 @@ class TaskService:
         """Finds and processes all 'Done' tasks."""
         filter_dict = {"property": "Status", "status": {"equals": "Done"}}
         logger.info("Querying for tasks with status 'Done'")
-        done_tasks = self.notion.query_database(self.task_database_id, filter_dict)
+        query_kwargs = {}
+        if limit is not None:
+            page_size = min(limit, 100)
+            query_kwargs = {
+                "page_size": page_size,
+                "max_pages": (limit + page_size - 1) // page_size,
+            }
+        done_tasks = self.notion.query_database(self.task_database_id, filter_dict, **query_kwargs)
         if limit is not None:
             done_tasks = done_tasks[:limit]
         logger.info(f"Found {len(done_tasks)} tasks to process.")
@@ -850,7 +863,7 @@ def main():
                 print("\nRecurring Tasks (Reset):")
                 for r in recurring: print(f"  - Task {r['original_task_id']} moved to Notebook {r['new_notebook_page_id']}")
             if non_recurring:
-                print("\nNon-Recurring Tasks (Archived):")
+                print("\nNon-Recurring Tasks (Marked Archived):")
                 for nr in non_recurring: print(f"  - Task {nr['original_task_id']} moved to Notebook {nr['new_notebook_page_id']}")
         
         print("\nTask processing complete.")

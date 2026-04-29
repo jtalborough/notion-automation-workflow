@@ -7,7 +7,8 @@ A GitHub Actions workflow that automates recurring tasks in Notion. When tasks m
 This automation runs daily via GitHub Actions to:
 - Check for completed tasks with recurrence tags in your Notion database
 - Create new instances of recurring tasks with updated due dates
-- Optionally archive non-recurring completed tasks
+- Copy completed task details into your Notebook database
+- Mark processed non-recurring completed tasks as `Archived` without moving them to Notion trash
 
 ## Recurrence Tags
 
@@ -39,10 +40,12 @@ Add these tags to your Notion tasks to set up recurring schedules:
      - `NOTION_REQUEST_TIMEOUT`: Defaults to `30` seconds.
 
 4. Ensure your Notion database has these properties:
-   - `Status`: Status property (for "Done" and "ToDo" states)
+   - `Status`: Status property (for "Done", "ToDo", and "Archived" states)
    - `Tag`: Multi-select property for recurrence tags
    - `DoDate`: Date property for due dates
    - `Done`: Checkbox property
+
+Completed non-recurring tasks are left in the task database with `Status` set to `Archived`. This keeps relations from time-tracking entries intact while allowing active task views to filter them out.
 
 The workflow will now run automatically:
 - Every day at midnight (UTC)
